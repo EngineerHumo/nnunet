@@ -1,0 +1,15 @@
+{
+    "channel_names": {
+        "0": "R",
+        "1": "G",
+        "2": "B"
+    },
+    "labels": {
+        "background": 0,
+        "forbidden area": 1,
+        "treated area": 2,
+        "available area": 3
+    },
+    "numTraining": 141,
+    "file_ending": ".png"
+}

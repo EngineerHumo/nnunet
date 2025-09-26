@@ -6,7 +6,6 @@ from Zig_RiR2d import ZRiR
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch
-from test2d import Eval
 import numpy as np
 
 
@@ -78,7 +77,7 @@ class loss(nn.Module):
 
 
 def get_model(args2):
-    model = R_RNR(channels=[64, 128, 256, 512], num_classes=args2.nclass, img_size=args2.crop_size[0], in_chans=3)
+    model = ZRiR(channels=[64, 128, 256, 512], num_classes=args2.nclass, img_size=args2.crop_size[0], in_chans=3)
     model = loss(model, args2)
     model = model.cuda()
     return model
@@ -95,6 +94,7 @@ def adjust_learning_rate(optimizer, base_lr, max_iters, cur_iters, warmup_iter=N
 
 
 def train():
+    from test2d import Eval
     args2 = parse_args()
     model = get_model(args2)
 
@@ -156,13 +156,13 @@ def train():
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train segmentation network')
-    parser.add_argument("--dataset", type=str, default='')
-    parser.add_argument("--end_epoch", type=int, default=3)
-    parser.add_argument("--warm_epochs", type=int, default=1)
+    parser.add_argument("--dataset", type=str, default='prp')
+    parser.add_argument("--end_epoch", type=int, default=400)
+    parser.add_argument("--warm_epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=0.0003)
-    parser.add_argument("--train_batchsize", type=int, default=1)
-    parser.add_argument("--crop_size", type=int, nargs='+', default=[256, 256], help='H, W')
-    parser.add_argument("--nclass", type=int, default=2)
+    parser.add_argument("--train_batchsize", type=int, default=2)
+    parser.add_argument("--crop_size", type=int, nargs='+', default=[512, 512], help='H, W')
+    parser.add_argument("--nclass", type=int, default=4)
     args2 = parser.parse_args()
 
     return args2
