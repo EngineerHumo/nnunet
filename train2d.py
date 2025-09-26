@@ -175,6 +175,7 @@ def parse_args():
     parser.add_argument("--warm_epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=0.0003)
     parser.add_argument("--train_batchsize", type=int, default=2)
+    parser.add_argument("--val_batchsize", type=int, default=1)
     parser.add_argument("--crop_size", type=int, nargs='+', default=[512, 512], help='H, W')
     parser.add_argument("--nclass", type=int, default=4)
     args2 = parser.parse_args()
