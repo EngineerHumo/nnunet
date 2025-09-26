@@ -48,7 +48,10 @@ class DiceLoss(nn.Module):
     def forward(self, inputs, target, weight=None, softmax=True):
         if softmax:
             inputs = torch.softmax(inputs, dim=1)
-        target = self._one_hot_encoder(target)
+        if target.dim() == inputs.dim():
+            target = target.float()
+        else:
+            target = self._one_hot_encoder(target)
         if weight is None:
             weight = [1] * self.n_classes
         assert inputs.size() == target.size(), 'predict & target shape do not match'
@@ -67,10 +70,12 @@ class loss(nn.Module):
         self.model = model
         self.ce_loss = CrossEntropyLoss()
         self.dice_loss = DiceLoss(args2.nclass)
-    def forward(self, input, label, train):
+
+    def forward(self, input, label, train, label_onehot=None):
         output = self.model(input)
         if train:
-            loss = self.dice_loss(output, label.long()) + self.ce_loss(output, label.long())
+            dice_target = label_onehot if label_onehot is not None else label.long()
+            loss = self.dice_loss(output, dice_target) + self.ce_loss(output, label.long())
             return loss
         else:
             return output
@@ -130,10 +135,19 @@ def train():
         model.train()
         setproctitle.setproctitle("Zig-RiR:" + str(epoch) + "/" + "{}".format(args2.end_epoch))
         for i, sample in enumerate(dataloader_train):
-            image, label = sample['image'], sample['label']
-            image, label = image.cuda(), label.cuda()
-            label = label.long().squeeze(1)
-            losses = model(image, label, True)
+            image = sample['image'].cuda().float()
+            label = sample['label'].cuda()
+            label_indices = sample['label_indices'].cuda()
+
+            if label_indices.dim() == 4 and label_indices.size(1) == 1:
+                label_indices = label_indices.squeeze(1)
+            label_indices = label_indices.long()
+
+            label_onehot = None
+            if label.dim() == 4 and label.size(1) == args2.nclass:
+                label_onehot = label.float()
+
+            losses = model(image, label_indices, True, label_onehot)
             loss = losses.mean()
             lenth_iter = len(dataloader_train)
             adjust_learning_rate(optimizer,
