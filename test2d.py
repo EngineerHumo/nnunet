@@ -67,6 +67,9 @@ def Eval(dataloader_test, model, args2):
     if args2.dataset in ['ISIC16', 'ISIC18']:
         evaluator = Evaluator()
 
+    if args2.dataset in ['prp']:
+        evaluators = [Evaluator() for _ in range(args2.nclass)]
+
     if args2.dataset in ['acdc']:
         evaluator_RV =  Evaluator()
         evaluator_Myo = Evaluator()
@@ -85,10 +88,15 @@ def Eval(dataloader_test, model, args2):
 
     with torch.no_grad():
         for i, sample in enumerate(dataloader_test):
-            image, label = sample['image'], sample['label']
-            image, label = image.cuda(), label.cuda()
-            label = label.long().squeeze(1)
-            logit = model(image, label, False)
+            image = sample['image'].cuda().float()
+            label = sample['label'].cuda()
+            label_indices = sample['label_indices'].cuda()
+
+            if label_indices.dim() == 4 and label_indices.size(1) == 1:
+                label_indices = label_indices.squeeze(1)
+            label_indices = label_indices.long()
+
+            logit = model(image, label_indices, False)
 
 
             if args2.dataset in ['ISIC16', 'ISIC18']:
@@ -96,14 +104,26 @@ def Eval(dataloader_test, model, args2):
 
                 predictions = torch.argmax(logit, dim=1)
                 predictions = F.one_hot(predictions.long(), num_classes=args2.nclass)
-                new_labels = F.one_hot(label.long(), num_classes=args2.nclass)
+                new_labels = F.one_hot(label_indices.long(), num_classes=args2.nclass)
                 evaluator.update(predictions[0, :, :, 1], new_labels[0, :, :, 1].float())
+
+
+            if args2.dataset in ['prp']:
+                predictions = torch.argmax(logit, dim=1)
+                pred = F.one_hot(predictions.long(), num_classes=args2.nclass).permute(0, 3, 1, 2)
+                if label.dim() == 4 and label.size(1) == args2.nclass:
+                    new_labels = label.float()
+                else:
+                    new_labels = F.one_hot(label_indices.long(), num_classes=args2.nclass).permute(0, 3, 1, 2).float()
+
+                for cls_idx in range(args2.nclass):
+                    evaluators[cls_idx].update(pred[0, cls_idx], new_labels[0, cls_idx])
 
 
             if args2.dataset in ['synapse']:
                 predictions = torch.argmax(logit, dim=1)
                 pred = F.one_hot(predictions.long(), num_classes=args2.nclass)
-                new_labels = F.one_hot(label.long(), num_classes=args2.nclass)
+                new_labels = F.one_hot(label_indices.long(), num_classes=args2.nclass)
 
                 evaluator_A.update(pred[0, :, :, 1], new_labels[0, :, :, 1].float())
                 evaluator_G.update(pred[0, :, :, 2], new_labels[0, :, :, 2].float())
@@ -118,7 +138,7 @@ def Eval(dataloader_test, model, args2):
             if args2.dataset in ['acdc']:
                 predictions = torch.argmax(logit, dim=1)
                 pred = F.one_hot(predictions.long(), num_classes=args2.nclass)
-                new_labels = F.one_hot(label.long(), num_classes=args2.nclass)
+                new_labels = F.one_hot(label_indices.long(), num_classes=args2.nclass)
                 evaluator_RV.update(pred[0, :, :, 1], new_labels[0, :, :, 1].float())
                 evaluator_Myo.update(pred[0, :, :, 2], new_labels[0, :, :, 2].float())
                 evaluator_LV.update(pred[0, :, :, 3], new_labels[0, :, :, 3].float())
@@ -129,6 +149,19 @@ def Eval(dataloader_test, model, args2):
         MAE, Rec, Pre, Acc, Dice, IoU = evaluator.show(False)
         print("MAE: ", "%.2f" % MAE, "  Recall: ", "%.2f" % Rec, " Pre: ", "%.2f" % Pre,
               " Acc: ", "%.2f" % Acc, " Dice: ", "%.2f" % Dice, " IoU: ", "%.2f" % IoU)
+
+
+    if args2.dataset in ['prp']:
+        metrics = [ev.show(False) for ev in evaluators]
+        class_names = [f'Class_{idx}' for idx in range(args2.nclass)]
+        for cls_name, metric in zip(class_names, metrics):
+            MAE, Rec, Pre, Acc, Dice, IoU = metric
+            print(f"{cls_name} -> MAE: {MAE:.2f}  Recall: {Rec:.2f}  Pre: {Pre:.2f}  Acc: {Acc:.2f}  Dice: {Dice:.2f}  IoU: {IoU:.2f}")
+
+        averaged = np.mean(np.array(metrics), axis=0)
+        MAE, Rec, Pre, Acc, Dice, IoU = averaged
+        print("Average -> MAE: %.2f  Recall: %.2f  Pre: %.2f  Acc: %.2f  Dice: %.2f  IoU: %.2f" %
+              (MAE, Rec, Pre, Acc, Dice, IoU))
 
 
     if args2.dataset in ['acdc']:
