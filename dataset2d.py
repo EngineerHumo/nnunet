@@ -104,6 +104,46 @@ class Data(data.Dataset):
             assert(len(self.images) == len(self.labels))
 
 
+
+            if self.dataset == 'prp':
+            if crop_szie is None:
+                crop_szie = [512, 512]
+            self.crop_size = crop_szie
+            if train:
+                self.image_dir = os.path.join(self.dataset_dir, self.dataset + '/images')
+                self.label_dir = os.path.join(self.dataset_dir, self.dataset + '/labels')
+                txt = os.path.join(self.dataset_dir, self.dataset + '/annotations' + '/train.txt')
+            else:
+                self.image_dir = os.path.join(self.dataset_dir, self.dataset + '/images')
+                self.label_dir = os.path.join(self.dataset_dir, self.dataset + '/labels')
+                txt = os.path.join(self.dataset_dir, self.dataset + '/annotations' + '/test.txt')
+
+            with open(txt, "r") as f:
+                self.filename_list = f.readlines()
+            for filename in self.filename_list:
+                image = os.path.join(self.image_dir, filename.strip() + '.png')
+                image = Image.open(image)
+                image = np.array(image)
+
+                if self.dataset == 'prp':
+                    label = os.path.join(self.label_dir, filename.strip() + '.png')
+                    label = Image.open(label)
+                    label = np.array(label)
+
+
+                if not self.train:
+                    image = cv2.resize(image, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
+                    if self.dataset == 'prp' :
+                        label = cv2.resize(label, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST) / 255
+
+
+                self.images.append(image)
+                self.labels.append(label)
+                self.names.append(filename.strip())
+
+            assert(len(self.images) == len(self.labels))
+
+
     def __len__(self):
         return len(self.images)
 
