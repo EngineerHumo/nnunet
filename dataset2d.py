@@ -10,9 +10,22 @@ from imgaug.augmentables.segmaps import SegmentationMapsOnImage
 
 
 ia.seed(1)
-seq = iaa.Sequential([iaa.Sharpen((0.0, 1.0)),
-                      iaa.Affine(scale=(1, 2)), iaa.Fliplr(0.5), iaa.Flipud(0.5), iaa.Crop(percent=(0, 0.1))], random_order=True)
+seq = iaa.Sequential([
+    iaa.Sharpen((0.0, 1.0)),
+    iaa.Affine(scale=(1, 2)),
+    iaa.Fliplr(0.5),
+    iaa.Flipud(0.5),
+    iaa.Crop(percent=(0, 0.1))
+], random_order=True)
 
+
+def to_one_hot(label, num_classes):
+    """Convert a 2D label map to a (C, H, W) one-hot representation."""
+    h, w = label.shape
+    one_hot = np.zeros((num_classes, h, w), dtype=np.uint8)
+    for class_idx in range(num_classes):
+        one_hot[class_idx] = (label == class_idx).astype(np.uint8)
+    return one_hot
 
 
 class Data(data.Dataset):
@@ -23,30 +36,30 @@ class Data(data.Dataset):
         self.dataset = dataset
         self.images = []
         self.labels = []
+        self.names = []
 
-
-        if self.dataset == 'acdc' or self.dataset == 'synapse':
-            if crop_szie is None:
-                crop_szie = [512, 512]
-            self.crop_size = crop_szie
-            if train:
-                self.dir = os.path.join(self.dataset_dir, self.dataset + '/data_npz')
-                txt = os.path.join(self.dataset_dir, self.dataset + '/annotations' + '/train.txt')
+        if crop_szie is None:
+            if self.dataset == 'prp':
+                crop_szie = [1240, 1240]
             else:
-                self.dir = os.path.join(self.dataset_dir, self.dataset + '/data_npz')
-                txt = os.path.join(self.dataset_dir, self.dataset + '/annotations' + '/test.txt')
+                crop_szie = [512, 512]
+        self.crop_size = crop_szie
 
-            with open(txt, "r") as f:
-                self.filename_list = f.readlines()
-            for filename in self.filename_list:
-                if self.dataset == 'acdc':
-                    npz = os.path.join(self.dir, filename.strip() + '.npz')
-                    data = np.load(npz)
-                    image, label = data['image'], data['label']
-                else:
-                    npz = os.path.join(self.dir, filename.strip() + '.npz')
-                    data = np.load(npz)
-                    image, label = data['image'], data['label']
+        if self.dataset in ['acdc', 'synapse']:
+            if train:
+                data_dir = os.path.join(self.dataset_dir, self.dataset, 'data_npz')
+                txt = os.path.join(self.dataset_dir, self.dataset, 'annotations', 'train.txt')
+            else:
+                data_dir = os.path.join(self.dataset_dir, self.dataset, 'data_npz')
+                txt = os.path.join(self.dataset_dir, self.dataset, 'annotations', 'test.txt')
+
+            with open(txt, 'r') as f:
+                filename_list = [line.strip() for line in f.readlines()]
+
+            for filename in filename_list:
+                npz_path = os.path.join(data_dir, filename + '.npz')
+                data_npz = np.load(npz_path)
+                image, label = data_npz['image'], data_npz['label']
 
                 image = np.array(image)
                 label = np.array(label)
@@ -58,118 +71,105 @@ class Data(data.Dataset):
 
                 self.images.append(image)
                 self.labels.append(label)
-                self.names.append(filename.strip())
-            assert (len(self.images) == len(self.labels))
+                self.names.append(filename)
 
-
-        if self.dataset == 'ISIC16' or self.dataset == 'ISIC18':
-            if crop_szie is None:
-                crop_szie = [512, 512]
-            self.crop_size = crop_szie
+        elif self.dataset in ['ISIC16', 'ISIC18', 'prp']:
             if train:
-                self.image_dir = os.path.join(self.dataset_dir, self.dataset + '/images')
-                self.label_dir = os.path.join(self.dataset_dir, self.dataset + '/labels')
-                txt = os.path.join(self.dataset_dir, self.dataset + '/annotations' + '/train.txt')
+                image_dir = os.path.join(self.dataset_dir, self.dataset, 'images')
+                label_dir = os.path.join(self.dataset_dir, self.dataset, 'labels')
+                txt = os.path.join(self.dataset_dir, self.dataset, 'annotations', 'train.txt')
             else:
-                self.image_dir = os.path.join(self.dataset_dir, self.dataset + '/images')
-                self.label_dir = os.path.join(self.dataset_dir, self.dataset + '/labels')
-                txt = os.path.join(self.dataset_dir, self.dataset + '/annotations' + '/test.txt')
+                image_dir = os.path.join(self.dataset_dir, self.dataset, 'images')
+                label_dir = os.path.join(self.dataset_dir, self.dataset, 'labels')
+                txt = os.path.join(self.dataset_dir, self.dataset, 'annotations', 'test.txt')
 
-            with open(txt, "r") as f:
-                self.filename_list = f.readlines()
-            for filename in self.filename_list:
-                image = os.path.join(self.image_dir, filename.strip() + '.jpg')
-                image = Image.open(image)
-                image = np.array(image)
+            with open(txt, 'r') as f:
+                filename_list = [line.strip() for line in f.readlines()]
 
-                if self.dataset == 'ISIC16':
-                    label = os.path.join(self.label_dir, filename.strip() + '.png')
-                    label = Image.open(label)
-                    label = np.array(label)
-                if self.dataset == 'ISIC18':
-                    label = os.path.join(self.label_dir, filename.strip() + '_segmentation.png')
-                    label = Image.open(label)
-                    label = np.array(label)
-
-                if not self.train:
-                    image = cv2.resize(image, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
-                    if self.dataset == 'ISIC16' or self.dataset == 'ISIC18':
-                        label = cv2.resize(label, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST) / 255
-
-
-                self.images.append(image)
-                self.labels.append(label)
-                self.names.append(filename.strip())
-
-            assert(len(self.images) == len(self.labels))
-
-
-
-            if self.dataset == 'prp':
-            if crop_szie is None:
-                crop_szie = [512, 512]
-            self.crop_size = crop_szie
-            if train:
-                self.image_dir = os.path.join(self.dataset_dir, self.dataset + '/images')
-                self.label_dir = os.path.join(self.dataset_dir, self.dataset + '/labels')
-                txt = os.path.join(self.dataset_dir, self.dataset + '/annotations' + '/train.txt')
-            else:
-                self.image_dir = os.path.join(self.dataset_dir, self.dataset + '/images')
-                self.label_dir = os.path.join(self.dataset_dir, self.dataset + '/labels')
-                txt = os.path.join(self.dataset_dir, self.dataset + '/annotations' + '/test.txt')
-
-            with open(txt, "r") as f:
-                self.filename_list = f.readlines()
-            for filename in self.filename_list:
-                image = os.path.join(self.image_dir, filename.strip() + '.png')
-                image = Image.open(image)
-                image = np.array(image)
-
+            for filename in filename_list:
                 if self.dataset == 'prp':
-                    label = os.path.join(self.label_dir, filename.strip() + '.png')
-                    label = Image.open(label)
-                    label = np.array(label)
+                    image_path = os.path.join(image_dir, filename + '.png')
+                    label_path = os.path.join(label_dir, filename + '.png')
+                else:
+                    image_path = os.path.join(image_dir, filename + '.jpg')
+                    if self.dataset == 'ISIC16':
+                        label_path = os.path.join(label_dir, filename + '.png')
+                    else:
+                        label_path = os.path.join(label_dir, filename + '_segmentation.png')
 
+                image = Image.open(image_path).convert('RGB')
+                label = Image.open(label_path)
+
+                image = np.array(image)
+                label = np.array(label)
 
                 if not self.train:
                     image = cv2.resize(image, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
-                    if self.dataset == 'prp' :
-                        label = cv2.resize(label, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST) / 255
-
+                    label = cv2.resize(label, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
+                    if self.dataset in ['ISIC16', 'ISIC18']:
+                        label = (label / 255).astype(np.uint8)
 
                 self.images.append(image)
                 self.labels.append(label)
-                self.names.append(filename.strip())
+                self.names.append(filename)
+        else:
+            raise ValueError(f'Unsupported dataset: {self.dataset}')
 
-            assert(len(self.images) == len(self.labels))
-
+        assert len(self.images) == len(self.labels)
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, index):
-        sample = {'image': self.images[index], 'label': self.labels[index]}
+        image = np.array(self.images[index], copy=True)
+        label = np.array(self.labels[index], copy=True)
+
+        sample = {'image': image, 'label': label, 'name': self.names[index]}
+
+        if self.dataset in ['acdc', 'synapse']:
+            sample['label'] = sample['label'].astype(np.int16)
 
         prob = random.random()
-        if self.dataset == 'acdc' or self.dataset == 'synapse':
-            sample['label'] = np.array(sample['label']).astype(np.int16)
         if self.train and prob > 0.5:
             segmap = SegmentationMapsOnImage(sample['label'], shape=sample['image'].shape)
-            sample['image'], sample['label'] = seq(image=sample['image'], segmentation_maps=segmap)
-            sample['label'] = sample['label'].get_arr()
+            aug_image, aug_label = seq(image=sample['image'], segmentation_maps=segmap)
+            sample['image'] = aug_image
+            sample['label'] = aug_label.get_arr()
 
         if self.train:
             sample['image'] = cv2.resize(sample['image'], (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
-            if self.dataset == 'acdc' or self.dataset == 'synapse':
+            if self.dataset in ['acdc', 'synapse']:
                 sample['image'] = np.expand_dims(sample['image'], axis=2)
-            if self.dataset == 'ISIC16' or self.dataset == 'ISIC18':
-                sample['label'] = cv2.resize(sample['label'], (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST) / 255
-            if self.dataset == 'acdc' or self.dataset == 'synapse':
-                sample['label'] = np.array(sample['label']).astype("float")
-                sample['label'] = cv2.resize(sample['label'], (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
+            sample['label'] = cv2.resize(sample['label'], (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
+
+        if self.dataset in ['ISIC16', 'ISIC18']:
+            sample['label'] = (sample['label'] / 255).astype(np.uint8)
+
+        label_indices = sample['label'].astype(np.int64)
+        if label_indices.ndim == 3 and label_indices.shape[2] == 1:
+            label_indices = np.squeeze(label_indices, axis=2)
+
+        if self.dataset == 'prp':
+            # Convert the label map (H, W) into four stacked binary maps (4, H, W).
+            one_hot_label = to_one_hot(label_indices, 4).astype(np.float32)
+            sample['label_indices'] = label_indices.astype(np.int64)
+            sample['label'] = one_hot_label
+        else:
+            if label_indices.ndim == 2:
+                expanded = np.expand_dims(label_indices, axis=0)
+            else:
+                expanded = label_indices
+            sample['label_indices'] = label_indices.astype(np.int64)
+            sample['label'] = expanded.astype(np.float32)
+
+        image_array = sample['image'].astype(np.float32)
+        if image_array.ndim == 3:
+            image_array = np.transpose(image_array, (2, 0, 1))
+        else:
+            image_array = np.expand_dims(image_array, axis=0)
+        sample['image'] = image_array
 
         return sample
-
 
     def __str__(self):
         return 'dataset:{} train:{}'.format(self.dataset, self.train)
