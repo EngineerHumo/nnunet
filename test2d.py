@@ -65,6 +65,7 @@ class Evaluator:
             (self.Accuracy ) *100 ,np.mean(self.Dice ) *100 ,np.mean(self.IoU) *100
 
 
+
 def _ensure_list(value: Any) -> list:
     if isinstance(value, (list, tuple)):
         return list(value)
@@ -79,6 +80,7 @@ def Eval(dataloader_test, model, args2,
     model.eval()
     summary = {'dataset': args2.dataset}
 
+
     if args2.dataset in ['ISIC16', 'ISIC18']:
         evaluator = Evaluator()
 
@@ -88,6 +90,7 @@ def Eval(dataloader_test, model, args2,
     if args2.dataset in ['acdc']:
         evaluator_RV =  Evaluator()
         evaluator_Myo = Evaluator()
+
         evaluator_LV =  Evaluator()
 
 
@@ -109,6 +112,7 @@ def Eval(dataloader_test, model, args2,
     visualized = False
 
     with torch.no_grad():
+
         for i, sample in enumerate(dataloader_test):
             image = sample['image'].cuda().float()
             label = sample['label'].cuda()
@@ -119,6 +123,7 @@ def Eval(dataloader_test, model, args2,
             label_indices = label_indices.long()
 
             logit = model(image, label_indices, False)
+
             predictions_indices = torch.argmax(logit, dim=1)
 
             if epoch_dir is not None:
@@ -129,6 +134,7 @@ def Eval(dataloader_test, model, args2,
                     gray = (mask * scale).clip(0, 255).astype(np.uint8)
                     name = names[b] if b < len(names) else f'sample_{i:04d}_{b}'
                     Image.fromarray(gray, mode='L').save(os.path.join(epoch_dir, f'{name}.png'))
+
 
 
             if args2.dataset in ['ISIC16', 'ISIC18']:
@@ -151,15 +157,18 @@ def Eval(dataloader_test, model, args2,
                 for cls_idx in range(args2.nclass):
                     evaluators[cls_idx].update(pred[0, cls_idx], new_labels[0, cls_idx])
 
+
                 if vis_reporter is not None and not visualized:
                     vis_reporter.show_sample('val', image[0], pred[0], new_labels[0])
                     visualized = True
+
 
 
             if args2.dataset in ['synapse']:
                 predictions = torch.argmax(logit, dim=1)
                 pred = F.one_hot(predictions.long(), num_classes=args2.nclass)
                 new_labels = F.one_hot(label_indices.long(), num_classes=args2.nclass)
+
 
                 evaluator_A.update(pred[0, :, :, 1], new_labels[0, :, :, 1].float())
                 evaluator_G.update(pred[0, :, :, 2], new_labels[0, :, :, 2].float())
@@ -171,13 +180,16 @@ def Eval(dataloader_test, model, args2,
                 evaluator_St.update(pred[0, :, :, 8], new_labels[0, :, :, 8].float())
 
 
+
             if args2.dataset in ['acdc']:
                 predictions = torch.argmax(logit, dim=1)
                 pred = F.one_hot(predictions.long(), num_classes=args2.nclass)
                 new_labels = F.one_hot(label_indices.long(), num_classes=args2.nclass)
+
                 evaluator_RV.update(pred[0, :, :, 1], new_labels[0, :, :, 1].float())
                 evaluator_Myo.update(pred[0, :, :, 2], new_labels[0, :, :, 2].float())
                 evaluator_LV.update(pred[0, :, :, 3], new_labels[0, :, :, 3].float())
+
 
 
 
@@ -185,6 +197,7 @@ def Eval(dataloader_test, model, args2,
         MAE, Rec, Pre, Acc, Dice, IoU = evaluator.show(False)
         print("MAE: ", "%.2f" % MAE, "  Recall: ", "%.2f" % Rec, " Pre: ", "%.2f" % Pre,
               " Acc: ", "%.2f" % Acc, " Dice: ", "%.2f" % Dice, " IoU: ", "%.2f" % IoU)
+
         summary['average'] = {
             'MAE': float(MAE),
             'Recall': float(Rec),
@@ -195,9 +208,11 @@ def Eval(dataloader_test, model, args2,
         }
 
 
+
     if args2.dataset in ['prp']:
         metrics = [ev.show(False) for ev in evaluators]
         class_names = [f'Class_{idx}' for idx in range(args2.nclass)]
+
         per_class = []
         for cls_name, metric in zip(class_names, metrics):
             MAE, Rec, Pre, Acc, Dice, IoU = metric
@@ -212,10 +227,12 @@ def Eval(dataloader_test, model, args2,
                 'IoU': float(IoU)
             })
 
+
         averaged = np.mean(np.array(metrics), axis=0)
         MAE, Rec, Pre, Acc, Dice, IoU = averaged
         print("Average -> MAE: %.2f  Recall: %.2f  Pre: %.2f  Acc: %.2f  Dice: %.2f  IoU: %.2f" %
               (MAE, Rec, Pre, Acc, Dice, IoU))
+
         summary['per_class'] = per_class
         summary['average'] = {
             'MAE': float(MAE),
@@ -277,6 +294,7 @@ def Eval(dataloader_test, model, args2,
         }
 
     return summary
+
 
 
 def parse_args():

@@ -133,7 +133,9 @@ class loss(nn.Module):
         if train:
             dice_target = label_onehot if label_onehot is not None else label.long()
             loss = self.dice_loss(output, dice_target) + self.ce_loss(output, label.long())
+
             return loss, output
+
         else:
             return output
 
@@ -197,6 +199,7 @@ def train():
                                   weight_decay=0.0001,
                                   )
 
+
     checkpoint_dir = os.path.join('.', 'checkpoints')
     os.makedirs(checkpoint_dir, exist_ok=True)
     best_dice = -float('inf')
@@ -206,6 +209,7 @@ def train():
     for epoch in range(args2.end_epoch):
         model.train()
         setproctitle.setproctitle("Zig-RiR:" + str(epoch) + "/" + "{}".format(args2.end_epoch))
+
         for i, sample in enumerate(dataloader_train):
             image = sample['image'].cuda().float()
             label = sample['label'].cuda()
@@ -219,8 +223,10 @@ def train():
             if label.dim() == 4 and label.size(1) == args2.nclass:
                 label_onehot = label.float()
 
+
             losses, logits = model(image, label_indices, True, label_onehot)
             loss = losses.mean()
+
             lenth_iter = len(dataloader_train)
             adjust_learning_rate(optimizer,
                                 args2.lr,
@@ -264,11 +270,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train segmentation network')
     parser.add_argument("--dataset", type=str, default='prp')
     parser.add_argument("--end_epoch", type=int, default=400)
+
     parser.add_argument("--warm_epochs", type=int, default=5)
+
     parser.add_argument("--lr", type=float, default=0.0003)
     parser.add_argument("--train_batchsize", type=int, default=2)
     parser.add_argument("--val_batchsize", type=int, default=1)
     parser.add_argument("--crop_size", type=int, nargs='+', default=[512, 512], help='H, W')
+
     parser.add_argument("--nclass", type=int, default=4)
     parser.add_argument("--val_output_dir", type=str, default='./val_predictions',
                         help='Directory for saving validation predictions')
@@ -277,6 +286,7 @@ def parse_args():
     parser.add_argument("--visdom_port", type=int, default=8097, help='Visdom server port')
     parser.add_argument("--visdom_env", type=str, default='zig_rir', help='Visdom environment name')
     parser.add_argument("--disable_visdom", action='store_true', help='Disable Visdom visualisation')
+
     args2 = parser.parse_args()
 
     return args2
