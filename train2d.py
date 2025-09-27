@@ -1,4 +1,7 @@
 import argparse
+import os
+from typing import Optional
+
 import torch.backends.cudnn as cudnn
 import setproctitle
 from dataset2d import Data
@@ -6,9 +9,63 @@ from Zig_RiR2d import ZRiR
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch
+import torch.nn.functional as F
 import numpy as np
 
+try:
+    import visdom
+except ImportError:  # pragma: no cover - optional dependency
+    visdom = None
 
+
+def _prepare_image_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    tensor = tensor.detach().float().cpu()
+    if tensor.dim() == 2:
+        tensor = tensor.unsqueeze(0)
+    if tensor.dim() == 3 and tensor.size(0) not in (1, 3):
+        tensor = tensor[:3]
+    if tensor.dim() == 3:
+        tensor_min = tensor.min()
+        tensor = tensor - tensor_min
+        tensor_max = tensor.max()
+        if tensor_max > 0:
+            tensor = tensor / tensor_max
+    return tensor.clamp(0.0, 1.0)
+
+
+class VisdomReporter:
+    def __init__(self, use_visdom: bool, server: str, port: int, env: str):
+        self.enabled = use_visdom and visdom is not None
+        self._viz: Optional['visdom.Visdom'] = None
+        if self.enabled:
+            self._viz = visdom.Visdom(server=server, port=port, env=env)
+            if not self._viz.check_connection():
+                print('Warning: Unable to connect to Visdom server. Visualisation disabled.')
+                self.enabled = False
+                self._viz = None
+
+    def show_sample(self, prefix: str, image: torch.Tensor, predictions: torch.Tensor,
+                    labels: Optional[torch.Tensor] = None) -> None:
+        if not self.enabled or self._viz is None:
+            return
+
+        image_tensor = _prepare_image_tensor(image)
+        self._viz.image(image_tensor, win=f'{prefix}_input', opts={'title': f'{prefix} Input'})
+
+        if predictions.dim() == 4:
+            predictions = predictions.squeeze(0)
+        for cls_idx in range(predictions.size(0)):
+            pred_tensor = _prepare_image_tensor(predictions[cls_idx])
+            self._viz.image(pred_tensor, win=f'{prefix}_pred_class_{cls_idx}',
+                            opts={'title': f'{prefix} Pred Class {cls_idx}'})
+
+        if labels is not None:
+            if labels.dim() == 4:
+                labels = labels.squeeze(0)
+            for cls_idx in range(min(labels.size(0), predictions.size(0))):
+                label_tensor = _prepare_image_tensor(labels[cls_idx])
+                self._viz.image(label_tensor, win=f'{prefix}_label_class_{cls_idx}',
+                                opts={'title': f'{prefix} Label Class {cls_idx}'})
 class CrossEntropyLoss(nn.Module):
     def __init__(self, weights=None, ignore_index=255):
         super(CrossEntropyLoss, self).__init__()
@@ -48,7 +105,10 @@ class DiceLoss(nn.Module):
     def forward(self, inputs, target, weight=None, softmax=True):
         if softmax:
             inputs = torch.softmax(inputs, dim=1)
-        target = self._one_hot_encoder(target)
+        if target.dim() == inputs.dim():
+            target = target.float()
+        else:
+            target = self._one_hot_encoder(target)
         if weight is None:
             weight = [1] * self.n_classes
         assert inputs.size() == target.size(), 'predict & target shape do not match'
@@ -67,19 +127,23 @@ class loss(nn.Module):
         self.model = model
         self.ce_loss = CrossEntropyLoss()
         self.dice_loss = DiceLoss(args2.nclass)
-    def forward(self, input, label, train):
+
+    def forward(self, input, label, train, label_onehot=None):
         output = self.model(input)
         if train:
-            loss = self.dice_loss(output, label.long()) + self.ce_loss(output, label.long())
-            return loss
+            dice_target = label_onehot if label_onehot is not None else label.long()
+            loss = self.dice_loss(output, dice_target) + self.ce_loss(output, label.long())
+            return loss, output
         else:
             return output
 
 
-def get_model(args2):
+def get_model(args2, device=None):
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = ZRiR(channels=[64, 128, 256, 512], num_classes=args2.nclass, img_size=args2.crop_size[0], in_chans=3)
     model = loss(model, args2)
-    model = model.cuda()
+    model = model.to(device)
     return model
 
 
@@ -96,7 +160,8 @@ def adjust_learning_rate(optimizer, base_lr, max_iters, cur_iters, warmup_iter=N
 def train():
     from test2d import Eval
     args2 = parse_args()
-    model = get_model(args2)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = get_model(args2, device=device)
 
     data_train = Data(train=True, dataset=args2.dataset, crop_szie=args2.crop_size)
     dataloader_train = DataLoader(
@@ -116,6 +181,12 @@ def train():
         pin_memory=True,
         sampler=None)
 
+    use_visdom = not args2.disable_visdom
+    vis_reporter = VisdomReporter(use_visdom, args2.visdom_server, args2.visdom_port, args2.visdom_env)
+
+    if args2.val_output_dir:
+        os.makedirs(args2.val_output_dir, exist_ok=True)
+
     optimizer = torch.optim.AdamW([{'params':
                                         filter(lambda p: p.requires_grad,
                                                model.parameters()),
@@ -126,14 +197,29 @@ def train():
                                   weight_decay=0.0001,
                                   )
 
+    checkpoint_dir = os.path.join('.', 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    best_dice = -float('inf')
+    best_checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pth')
+    last_checkpoint_path = os.path.join(checkpoint_dir, 'last_model.pth')
+
     for epoch in range(args2.end_epoch):
         model.train()
         setproctitle.setproctitle("Zig-RiR:" + str(epoch) + "/" + "{}".format(args2.end_epoch))
         for i, sample in enumerate(dataloader_train):
-            image, label = sample['image'], sample['label']
-            image, label = image.cuda(), label.cuda()
-            label = label.long().squeeze(1)
-            losses = model(image, label, True)
+            image = sample['image'].cuda().float()
+            label = sample['label'].cuda()
+            label_indices = sample['label_indices'].cuda()
+
+            if label_indices.dim() == 4 and label_indices.size(1) == 1:
+                label_indices = label_indices.squeeze(1)
+            label_indices = label_indices.long()
+
+            label_onehot = None
+            if label.dim() == 4 and label.size(1) == args2.nclass:
+                label_onehot = label.float()
+
+            losses, logits = model(image, label_indices, True, label_onehot)
             loss = losses.mean()
             lenth_iter = len(dataloader_train)
             adjust_learning_rate(optimizer,
@@ -143,14 +229,34 @@ def train():
                                 args2.warm_epochs * lenth_iter
                                 )
             print("epoch:[{}/{}], iter:[{}/{}], ".format(epoch, args2.end_epoch, i, len(dataloader_train)))
+            if vis_reporter.enabled and i == 0:
+                probs = torch.softmax(logits.detach(), dim=1)[0]
+                if label_onehot is not None:
+                    gt_vis = label_onehot[0].detach()
+                else:
+                    gt_vis = F.one_hot(label_indices[0].detach(), num_classes=args2.nclass).permute(2, 0, 1).float()
+                vis_reporter.show_sample('train', image[0], probs, gt_vis)
+
             model.zero_grad()
             loss.backward()
             optimizer.step()
 
         if epoch % 2 == 0:
             print('val num / batchsize:', len(dataloader_val))
-            Eval(dataloader_val, model, args2)
+            eval_results = Eval(dataloader_val, model, args2,
+                                vis_reporter=vis_reporter,
+                                epoch=epoch,
+                                save_dir=args2.val_output_dir if args2.val_output_dir else None)
+            if eval_results is not None:
+                average_metrics = eval_results.get('average')
+                if average_metrics is not None:
+                    val_dice = average_metrics.get('Dice')
+                    if val_dice is not None and val_dice > best_dice:
+                        best_dice = val_dice
+                        torch.save(model.state_dict(), best_checkpoint_path)
+                        print(f'New best model saved with Dice={best_dice:.2f} at {best_checkpoint_path}')
     torch.save(model.state_dict(), './weight.pkl')
+    torch.save(model.state_dict(), last_checkpoint_path)
 
 
 
@@ -161,8 +267,16 @@ def parse_args():
     parser.add_argument("--warm_epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=0.0003)
     parser.add_argument("--train_batchsize", type=int, default=2)
+    parser.add_argument("--val_batchsize", type=int, default=1)
     parser.add_argument("--crop_size", type=int, nargs='+', default=[512, 512], help='H, W')
     parser.add_argument("--nclass", type=int, default=4)
+    parser.add_argument("--val_output_dir", type=str, default='./val_predictions',
+                        help='Directory for saving validation predictions')
+    parser.add_argument("--visdom_server", type=str, default='http://localhost',
+                        help='Visdom server URL')
+    parser.add_argument("--visdom_port", type=int, default=8097, help='Visdom server port')
+    parser.add_argument("--visdom_env", type=str, default='zig_rir', help='Visdom environment name')
+    parser.add_argument("--disable_visdom", action='store_true', help='Disable Visdom visualisation')
     args2 = parser.parse_args()
 
     return args2
