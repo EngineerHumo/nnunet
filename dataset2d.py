@@ -124,7 +124,10 @@ class Data(data.Dataset):
         image = np.array(self.images[index], copy=True)
         label = np.array(self.labels[index], copy=True)
 
-        sample = {'image': image, 'label': label}
+
+        sample = {'image': image, 'label': label, 'name': self.names[index]}
+
+
 
         if self.dataset in ['acdc', 'synapse']:
             sample['label'] = sample['label'].astype(np.int16)
