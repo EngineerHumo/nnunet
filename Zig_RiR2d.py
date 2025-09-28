@@ -6,6 +6,11 @@ import math
 from einops import rearrange, repeat
 
 
+def _exp_clamped(tensor: torch.Tensor) -> torch.Tensor:
+    clamp_min, clamp_max = -60.0, 60.0
+    return torch.exp(torch.clamp(tensor, min=clamp_min, max=clamp_max))
+
+
 
 up_kwargs = {'mode': 'bilinear', 'align_corners': True}
 T_MAX = 512*64
@@ -73,7 +78,44 @@ class WKV(torch.autograd.Function):
             return (None, None, None, gw, gu, gk, gv)
 
 
+def _run_wkv_fallback(B, T, C, w, u, k, v):
+    device = k.device
+    dtype = k.dtype
+
+    w = w.to(device=device, dtype=dtype)
+    u = u.to(device=device, dtype=dtype)
+    k = k.to(dtype=dtype)
+    v = v.to(dtype=dtype)
+
+    decay = _exp_clamped(-w).unsqueeze(0)
+    first = _exp_clamped(u).unsqueeze(0)
+
+    state_num = torch.zeros(B, C, device=device, dtype=dtype)
+    state_den = torch.zeros(B, C, device=device, dtype=dtype)
+    outputs = []
+    eps = torch.finfo(dtype).eps
+
+    for t in range(T):
+        k_t = k[:, t, :]
+        v_t = v[:, t, :]
+        exp_k = _exp_clamped(k_t)
+
+        numerator = state_num + first * exp_k * v_t
+        denominator = state_den + first * exp_k
+        outputs.append((numerator / (denominator + eps)).unsqueeze(1))
+
+        state_num = state_num * decay + exp_k * v_t
+        state_den = state_den * decay + exp_k
+
+    return torch.cat(outputs, dim=1)
+
+
 def RUN_CUDA(B, T, C, w, u, k, v):
+    in_onnx_export = False
+    if hasattr(torch.onnx, 'is_in_onnx_export'):
+        in_onnx_export = torch.onnx.is_in_onnx_export()
+    if (not k.is_cuda) or in_onnx_export or torch.jit.is_tracing():
+        return _run_wkv_fallback(B, T, C, w, u, k, v)
     return WKV.apply(B, T, C, w.cuda(), u.cuda(), k.cuda(), v.cuda())
 
 
