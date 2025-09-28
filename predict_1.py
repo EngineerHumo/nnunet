@@ -8,7 +8,7 @@ from PIL import Image
 from torch.utils.data import DataLoader
 
 from dataset2d import Data
-from train2d import get_model
+from train2d import build_segmentation_model
 
 
 def parse_args():
@@ -17,11 +17,12 @@ def parse_args():
     parser.add_argument('--data_dir', type=str, default='./data/', help='Root directory that contains the dataset folders')
     parser.add_argument('--weight-path', type=str, default='./weight.pkl', help='Path to the trained model weights saved as a pickle')
     parser.add_argument('--output-dir', type=str, default='./output', help='Directory where predicted masks will be written')
-    parser.add_argument('--onnx-path', type=str, default='./test1.onnx', help='File path to export the ONNX model snapshot')
+    parser.add_argument('--onnx-path', type=str, default='./checkpoints/best_model.onnx', help='File path to export the ONNX model snapshot')
     parser.add_argument('--batchsize', type=int, default=1, help='Batch size for inference')
-    parser.add_argument('--crop_size', type=int, nargs='+', default=[512, 512], help='Input size H W expected by the network')
+    parser.add_argument('--crop_size', type=int, nargs='+', default=[1024, 1024], help='Input size H W expected by the network')
     parser.add_argument('--nclass', type=int, default=4, help='Number of segmentation classes')
-    parser.add_argument('--opset', type=int, default=11, help='ONNX opset version for export')
+    parser.add_argument('--input_channels', type=int, default=3, help='Number of channels expected by the network')
+    parser.add_argument('--opset', type=int, default=13, help='ONNX opset version for export')
     return parser.parse_args()
 
 
@@ -133,12 +134,10 @@ def main():
         drop_last=False
     )
 
-    model = get_model(args, device=device)
+    segmentation_model = build_segmentation_model(args, device=device)
     state_dict = torch.load(args.weight_path, map_location=device)
-    model.load_state_dict(state_dict)
-    model.eval()
-
-    segmentation_model = model.model.to(device).eval()
+    segmentation_model.load_state_dict(state_dict)
+    segmentation_model = segmentation_model.to(device).eval()
 
     save_predictions(segmentation_model, dataloader_test, device, args.output_dir, args.nclass)
     print(f'Predictions saved to {os.path.abspath(args.output_dir)}')
