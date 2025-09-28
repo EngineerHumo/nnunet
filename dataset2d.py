@@ -10,12 +10,19 @@ from imgaug.augmentables.segmaps import SegmentationMapsOnImage
 
 
 ia.seed(1)
+# Compose a richer augmentation pipeline to improve generalisation on the PRP dataset.
+# The sequence favours photometric adjustments in addition to the original geometric
+# transformations so that the model sees more diverse colour and contrast conditions
+# while keeping label consistency.
 seq = iaa.Sequential([
+    iaa.Sometimes(0.7, iaa.LinearContrast((0.85, 1.2))),
+    iaa.Sometimes(0.5, iaa.AddToHueAndSaturation((-10, 10))),
+    iaa.Sometimes(0.4, iaa.AdditiveGaussianNoise(scale=(0, 0.01 * 255))),
     iaa.Sharpen((0.0, 1.0)),
-    iaa.Affine(scale=(1, 2)),
+    iaa.Affine(scale=(0.9, 1.1), rotate=(-10, 10), shear=(-8, 8)),
     iaa.Fliplr(0.5),
     iaa.Flipud(0.5),
-    iaa.Crop(percent=(0, 0.1))
+    iaa.Crop(percent=(0, 0.08))
 ], random_order=True)
 
 
@@ -40,7 +47,7 @@ class Data(data.Dataset):
 
         if crop_szie is None:
             if self.dataset == 'prp':
-                crop_szie = [1240, 1240]
+                crop_szie = [1024, 1024]
             else:
                 crop_szie = [512, 512]
         self.crop_size = crop_szie
@@ -65,7 +72,7 @@ class Data(data.Dataset):
                 label = np.array(label)
 
                 if not self.train:
-                    image = cv2.resize(image, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
+                    image = cv2.resize(image, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_LINEAR)
                     image = np.expand_dims(image, axis=2)
                     label = cv2.resize(label, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
 
@@ -104,7 +111,7 @@ class Data(data.Dataset):
                 label = np.array(label)
 
                 if not self.train:
-                    image = cv2.resize(image, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
+                    image = cv2.resize(image, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_LINEAR)
                     label = cv2.resize(label, (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
                     if self.dataset in ['ISIC16', 'ISIC18']:
                         label = (label / 255).astype(np.uint8)
@@ -140,7 +147,8 @@ class Data(data.Dataset):
             sample['label'] = aug_label.get_arr()
 
         if self.train:
-            sample['image'] = cv2.resize(sample['image'], (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
+            image_interp = cv2.INTER_LINEAR if sample['image'].ndim == 3 else cv2.INTER_NEAREST
+            sample['image'] = cv2.resize(sample['image'], (self.crop_size[0], self.crop_size[1]), interpolation=image_interp)
             if self.dataset in ['acdc', 'synapse']:
                 sample['image'] = np.expand_dims(sample['image'], axis=2)
             sample['label'] = cv2.resize(sample['label'], (self.crop_size[0], self.crop_size[1]), interpolation=cv2.INTER_NEAREST)
