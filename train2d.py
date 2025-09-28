@@ -247,7 +247,7 @@ def train():
             loss.backward()
             optimizer.step()
 
-        if epoch % 2 == 0:
+        if epoch % 10 == 0:
             print('val num / batchsize:', len(dataloader_val))
             eval_results = Eval(dataloader_val, model, args2,
                                 vis_reporter=vis_reporter,
