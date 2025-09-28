@@ -6,6 +6,7 @@ import math
 from einops import rearrange, repeat
 
 
+@torch.jit.script
 def _exp_clamped(tensor: torch.Tensor) -> torch.Tensor:
     clamp_min, clamp_max = -60.0, 60.0
     return torch.exp(torch.clamp(tensor, min=clamp_min, max=clamp_max))
@@ -78,6 +79,38 @@ class WKV(torch.autograd.Function):
             return (None, None, None, gw, gu, gk, gv)
 
 
+@torch.jit.script
+def _wkv_fallback_scan(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    decay: torch.Tensor,
+    first: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    B = k.size(0)
+    T = k.size(1)
+    C = k.size(2)
+
+    state_num = torch.zeros((B, C), dtype=k.dtype, device=k.device)
+    state_den = torch.zeros((B, C), dtype=k.dtype, device=k.device)
+    outputs = torch.empty((B, T, C), dtype=k.dtype, device=k.device)
+
+    for t in range(T):
+        k_t = k[:, t, :]
+        v_t = v[:, t, :]
+        exp_k = _exp_clamped(k_t)
+
+        numerator = state_num + first * exp_k * v_t
+        denominator = state_den + first * exp_k
+
+        outputs[:, t, :] = numerator / (denominator + eps)
+
+        state_num = state_num * decay + exp_k * v_t
+        state_den = state_den * decay + exp_k
+
+    return outputs
+
+
 def _run_wkv_fallback(B, T, C, w, u, k, v):
     device = k.device
     dtype = k.dtype
@@ -90,24 +123,9 @@ def _run_wkv_fallback(B, T, C, w, u, k, v):
     decay = _exp_clamped(-w).unsqueeze(0)
     first = _exp_clamped(u).unsqueeze(0)
 
-    state_num = torch.zeros(B, C, device=device, dtype=dtype)
-    state_den = torch.zeros(B, C, device=device, dtype=dtype)
-    outputs = []
-    eps = torch.finfo(dtype).eps
+    eps = float(torch.finfo(dtype).eps)
 
-    for t in range(T):
-        k_t = k[:, t, :]
-        v_t = v[:, t, :]
-        exp_k = _exp_clamped(k_t)
-
-        numerator = state_num + first * exp_k * v_t
-        denominator = state_den + first * exp_k
-        outputs.append((numerator / (denominator + eps)).unsqueeze(1))
-
-        state_num = state_num * decay + exp_k * v_t
-        state_den = state_den * decay + exp_k
-
-    return torch.cat(outputs, dim=1)
+    return _wkv_fallback_scan(k, v, decay, first, eps)
 
 
 def RUN_CUDA(B, T, C, w, u, k, v):
