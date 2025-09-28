@@ -152,6 +152,7 @@ def build_segmentation_model(args2, device=None):
 def get_model(args2, device=None):
     segmentation_model = build_segmentation_model(args2, device=device)
     model = loss(segmentation_model, args2)
+
     try:
         model_device = next(model.parameters()).device
     except StopIteration:
@@ -159,6 +160,7 @@ def get_model(args2, device=None):
     if model_device is None:
         model_device = device if device is not None else torch.device('cpu')
     return model.to(model_device)
+
 
 
 def adjust_learning_rate(optimizer, base_lr, max_iters, cur_iters, warmup_iter=None, power=0.9):
