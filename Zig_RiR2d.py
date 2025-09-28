@@ -208,16 +208,35 @@ def RUN_CUDA(B, T, C, w, u, k, v):
 def q_shift(input, shift_pixel=1, gamma=1 / 4):
     assert gamma <= 1 / 4
     B, C, H, W = input.shape
+
+    channel_indices = torch.arange(C, device=input.device)
+    quarter = int(C * gamma)
+    half = quarter * 2
+    three_quarter = quarter * 3
+    four_quarter = quarter * 4
+
     output = torch.zeros_like(input)
-    output[:, 0:int(C * gamma), :, shift_pixel:W] = input[:, 0:int(C * gamma), :, 0:W - shift_pixel]
-    output[:, int(C * gamma):int(C * gamma * 2), :, 0:W - shift_pixel] = input[:, int(C * gamma):int(C * gamma * 2), :,
-                                                                         shift_pixel:W]
-    output[:, int(C * gamma * 2):int(C * gamma * 3), shift_pixel:H, :] = input[:, int(C * gamma * 2):int(C * gamma * 3),
-                                                                         0:H - shift_pixel, :]
-    output[:, int(C * gamma * 3):int(C * gamma * 4), 0:H - shift_pixel, :] = input[:,
-                                                                             int(C * gamma * 3):int(C * gamma * 4),
-                                                                             shift_pixel:H, :]
-    output[:, int(C * gamma * 4):, ...] = input[:, int(C * gamma * 4):, ...]
+
+    if quarter > 0 and shift_pixel < W:
+        group = channel_indices < quarter
+        output[:, group, :, shift_pixel:] = input[:, group, :, :W - shift_pixel]
+
+    if half > quarter and shift_pixel < W:
+        group = (channel_indices >= quarter) & (channel_indices < half)
+        output[:, group, :, :W - shift_pixel] = input[:, group, :, shift_pixel:]
+
+    if three_quarter > half and shift_pixel < H:
+        group = (channel_indices >= half) & (channel_indices < three_quarter)
+        output[:, group, shift_pixel:, :] = input[:, group, :H - shift_pixel, :]
+
+    if four_quarter > three_quarter and shift_pixel < H:
+        group = (channel_indices >= three_quarter) & (channel_indices < four_quarter)
+        output[:, group, :H - shift_pixel, :] = input[:, group, shift_pixel:, :]
+
+    if four_quarter < C:
+        group = channel_indices >= four_quarter
+        output[:, group, ...] = input[:, group, ...]
+
     return output
 
 
@@ -246,45 +265,30 @@ class VRWKV_SpatialMix(nn.Module):
         self.spatial_first = nn.Parameter(torch.randn((self.recurrence, self.n_embd)))
 
     def get_zigzag_indices(self, h, w, start='top-left', direction='horizontal'):
-        indices = []
-        if start == 'top-left':
-            row_start = 0
-            col_start = 0
-            row_step = 1
-            col_step = 1 if direction == 'horizontal' else 1
-        elif start == 'top-right':
-            row_start = 0
-            col_start = w - 1
-            row_step = 1
-            col_step = -1 if direction == 'horizontal' else -1
-        elif start == 'bottom-left':
-            row_start = h - 1
-            col_start = 0
-            row_step = -1
-            col_step = 1 if direction == 'horizontal' else 1
-        elif start == 'bottom-right':
-            row_start = h - 1
-            col_start = w - 1
-            row_step = -1
-            col_step = -1 if direction == 'horizontal' else -1
+        device = self.device
+        rows = torch.arange(h, device=device, dtype=torch.long)
+        cols = torch.arange(w, device=device, dtype=torch.long)
 
-        for i in range(h):
-            current_row = row_start + row_step * i
-            if direction == 'horizontal':
-                if current_row % 2 == 0:
-                    cols = list(range(w))
-                else:
-                    cols = list(range(w - 1, -1, -1))
-                for col in cols:
-                    indices.append(current_row * w + col)
-            elif direction == 'vertical':
-                if (col_start + col_step * i) % 2 == 0:
-                    rows = list(range(h))
-                else:
-                    rows = list(range(h - 1, -1, -1))
-                for row in rows:
-                    indices.append(row * w + (col_start + col_step * i))
-        return torch.tensor(indices, dtype=torch.long, device=self.device)
+        if direction == 'horizontal':
+            row_sequence = rows if start in ('top-left', 'top-right') else torch.flip(rows, dims=(0,))
+            even_mask = (rows % 2 == 0).unsqueeze(1)
+            base_cols = cols.expand(h, -1)
+            flipped_cols = torch.flip(cols, dims=(0,)).expand(h, -1)
+            rowwise_cols = torch.where(even_mask, base_cols, flipped_cols)
+            ordered_cols = rowwise_cols.index_select(0, row_sequence)
+            ordered_rows = row_sequence.unsqueeze(1).expand_as(ordered_cols)
+            indices = ordered_rows * w + ordered_cols
+        else:
+            col_sequence = cols if start in ('top-left', 'bottom-left') else torch.flip(cols, dims=(0,))
+            even_mask = (cols % 2 == 0).unsqueeze(1)
+            base_rows = rows.expand(w, -1)
+            flipped_rows = torch.flip(rows, dims=(0,)).expand(w, -1)
+            colwise_rows = torch.where(even_mask, base_rows, flipped_rows)
+            ordered_rows = colwise_rows.index_select(0, col_sequence)
+            ordered_cols = col_sequence.unsqueeze(1).expand_as(ordered_rows)
+            indices = ordered_rows * w + ordered_cols
+
+        return indices.reshape(-1)
 
 
     def jit_func(self, x, resolution, scan_scheme):
@@ -423,7 +427,8 @@ class PatchMerging2D_sentence(nn.Module):
         x = self.norm(x)
         x = x.transpose(1, 2).reshape(B, C, H, W)
         x = self.conv(x)
-        H, W = math.ceil(H / self.stride), math.ceil(W / self.stride)
+        H = (H + self.stride - 1) // self.stride
+        W = (W + self.stride - 1) // self.stride
         x = x.reshape(B, -1, H * W).transpose(1, 2)
         return x, H, W
 
@@ -443,9 +448,10 @@ class PatchMerging2D_word(nn.Module):
         x = self.norm(x)
         x = x.reshape(-1, H_out, W_out, H_in, W_in, C)
 
-        pad_input = (H_out % 2 == 1) or (W_out % 2 == 1)
-        if pad_input:
-            x = F.pad(x.permute(0, 3, 4, 5, 1, 2), (0, W_out % 2, 0, H_out % 2))
+        pad_h = H_out % 2
+        pad_w = W_out % 2
+        if pad_h or pad_w:
+            x = F.pad(x.permute(0, 3, 4, 5, 1, 2), (0, pad_w, 0, pad_h))
             x = x.permute(0, 4, 5, 1, 2, 3)
 
         x1 = x[:, 0::2, 0::2, :, :, :]
@@ -640,7 +646,8 @@ class PyramidRiR_enc(nn.Module):
                 outer_tokens, H_out, W_out = self.sentence_merges[i - 1](outer_tokens, H_out, W_out)
             inner_tokens, outer_tokens = self.stages[i](inner_tokens, outer_tokens, H_out, W_out, H_in, W_in)
             b, l, m = outer_tokens.shape
-            mid_out = outer_tokens.reshape(b, int(math.sqrt(l)), int(math.sqrt(l)), m).permute(0, 3, 1, 2)
+            side = math.isqrt(l)
+            mid_out = outer_tokens.reshape(b, side, side, m).permute(0, 3, 1, 2)
             mid_out = self.up_blocks[i](mid_out)
             outputs.append(mid_out)
         return outputs
