@@ -140,7 +140,18 @@ The following scripts can be used for training our Zig-RiR model on the datasets
 ###############2D dataset############### We also provide 2D training scripts for the 3D Synapse and ACDC datasets, referring to the slicing data preprocessing script in 2D TransUnet.
 CUDA_VISIBLE_DEVICES=0 python train.py --dataset ISIC16 --end_epoch 200 --warm_epochs 5 --lr 0.0003 --train_batchsize 8 --crop_size 512 512 --nclass 2
 
-###############3D dataset############### We refer to the official UNETR++ repository when training 3D datasets. 
+###############PRP dataset###############
+# Default crop-size has been increased to 1024×1024. The following command enables
+# TensorBoard tracking and exports the best checkpoint to ONNX automatically.
+CUDA_VISIBLE_DEVICES=0 python train2d.py \
+  --dataset prp \
+  --end_epoch 400 \
+  --crop_size 1024 1024 \
+  --nclass 4 \
+  --log_dir ./runs/prp_experiment \
+  --onnx_path ./checkpoints/prp_best.onnx
+
+###############3D dataset############### We refer to the official UNETR++ repository when training 3D datasets.
 CUDA_VISIBLE_DEVICES=0 python /zig_rir3d/run/run_training.py 3d_fullres unetr_pp_trainer_synapse 2 0
 CUDA_VISIBLE_DEVICES=0 python /zig_rir3d/run/run_training.py 3d_fullres unetr_pp_trainer_acdc 1 0
 
@@ -152,6 +163,9 @@ CUDA_VISIBLE_DEVICES=0 python /zig_rir3d/run/run_training.py 3d_fullres unetr_pp
 1- For 2D ISIC dataset, you can run the following command for evaluation:
 ```shell
 CUDA_VISIBLE_DEVICES=0 python test2d.py --dataset ISIC16 --end_epoch 200 --warm_epochs 5 --lr 0.0003 --train_batchsize 8 --crop_size 512 512 --nclass 2
+
+# For PRP inference with ONNX export:
+python predict_1.py --dataset prp --crop_size 1024 1024 --onnx-path ./checkpoints/prp_best.onnx
 ```
 2- For 3D Synapse dataset, find your saved Synapse weight and paste ```model_final_checkpoint.model``` in the following path:
 ```shell
