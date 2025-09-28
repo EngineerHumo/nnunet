@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 import torch
 import torch.nn.functional as F
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
 
 try:
     import visdom
@@ -140,12 +141,18 @@ class loss(nn.Module):
             return output
 
 
-def get_model(args2, device=None):
+def build_segmentation_model(args2, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = ZRiR(channels=[64, 128, 256, 512], num_classes=args2.nclass, img_size=args2.crop_size[0], in_chans=3)
-    model = loss(model, args2)
-    model = model.to(device)
+    model = ZRiR(channels=[64, 128, 256, 512], num_classes=args2.nclass,
+                 img_size=args2.crop_size[0], in_chans=args2.input_channels)
+    return model.to(device)
+
+
+def get_model(args2, device=None):
+    segmentation_model = build_segmentation_model(args2, device=device)
+    model = loss(segmentation_model, args2)
+    model = model.to(segmentation_model.device)
     return model
 
 
@@ -159,6 +166,67 @@ def adjust_learning_rate(optimizer, base_lr, max_iters, cur_iters, warmup_iter=N
     optimizer.param_groups[0]['lr'] = lr
 
 
+def log_validation_metrics(writer: Optional[SummaryWriter], summary: Optional[dict], epoch: int) -> None:
+    if writer is None or summary is None:
+        return
+
+    average = summary.get('average')
+    if average:
+        for metric_name, value in average.items():
+            writer.add_scalar(f'val/{metric_name}', value, epoch)
+
+    per_class = summary.get('per_class', [])
+    for entry in per_class:
+        class_name = entry.get('Class', 'cls')
+        for metric_name, value in entry.items():
+            if metric_name == 'Class':
+                continue
+            writer.add_scalar(f'val/{class_name}/{metric_name}', value, epoch)
+
+
+def export_trained_model_to_onnx(args2, checkpoint_path: str) -> None:
+    if not args2.onnx_path:
+        return
+
+    if not os.path.exists(checkpoint_path):
+        print(f'ONNX export skipped because checkpoint {checkpoint_path} was not found.')
+        return
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    segmentation_model = build_segmentation_model(args2, device=device)
+    state_dict = torch.load(checkpoint_path, map_location=device)
+    segmentation_model.load_state_dict(state_dict)
+    segmentation_model.eval()
+
+    if args2.export_input_size is not None:
+        if len(args2.export_input_size) == 2:
+            height, width = args2.export_input_size
+        elif len(args2.export_input_size) == 3:
+            _, height, width = args2.export_input_size
+        else:
+            raise ValueError('export_input_size must have 2 (H W) or 3 (C H W) values')
+    else:
+        height, width = args2.crop_size
+
+    dummy_input = torch.randn(1, args2.input_channels, height, width, device=device)
+
+    os.makedirs(os.path.dirname(args2.onnx_path) or '.', exist_ok=True)
+
+    torch.onnx.export(
+        segmentation_model,
+        dummy_input,
+        args2.onnx_path,
+        input_names=['input'],
+        output_names=['output'],
+        opset_version=args2.onnx_opset,
+        dynamic_axes={
+            'input': {0: 'batch', 2: 'height', 3: 'width'},
+            'output': {0: 'batch', 2: 'height', 3: 'width'}
+        }
+    )
+    print(f'Exported ONNX model to {os.path.abspath(args2.onnx_path)}')
+
+
 def train():
     from test2d import Eval
     args2 = parse_args()
@@ -170,7 +238,7 @@ def train():
         data_train,
         batch_size=args2.train_batchsize,
         shuffle=True,
-        num_workers=8,
+        num_workers=args2.train_workers,
         pin_memory=True,
         drop_last=False,
         sampler=None)
@@ -179,7 +247,7 @@ def train():
         data_val,
         batch_size=args2.val_batchsize,
         shuffle=False,
-        num_workers=4,
+        num_workers=args2.val_workers,
         pin_memory=True,
         sampler=None)
 
@@ -200,12 +268,15 @@ def train():
                                   )
 
 
+    writer = SummaryWriter(log_dir=args2.log_dir) if not args2.disable_logging else None
+
     checkpoint_dir = os.path.join('.', 'checkpoints')
     os.makedirs(checkpoint_dir, exist_ok=True)
     best_dice = -float('inf')
     best_checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pth')
     last_checkpoint_path = os.path.join(checkpoint_dir, 'last_model.pth')
 
+    global_step = 0
     for epoch in range(args2.end_epoch):
         model.train()
         setproctitle.setproctitle("Zig-RiR:" + str(epoch) + "/" + "{}".format(args2.end_epoch))
@@ -247,7 +318,12 @@ def train():
             loss.backward()
             optimizer.step()
 
-        if epoch % 10 == 0:
+            if writer is not None:
+                writer.add_scalar('train/loss', loss.item(), global_step)
+                writer.add_scalar('train/lr', optimizer.param_groups[0]['lr'], global_step)
+            global_step += 1
+
+        if epoch % args2.val_interval == 0 or epoch == args2.end_epoch - 1:
             print('val num / batchsize:', len(dataloader_val))
             eval_results = Eval(dataloader_val, model, args2,
                                 vis_reporter=vis_reporter,
@@ -259,10 +335,16 @@ def train():
                     val_dice = average_metrics.get('Dice')
                     if val_dice is not None and val_dice > best_dice:
                         best_dice = val_dice
-                        torch.save(model.state_dict(), best_checkpoint_path)
+                        torch.save(model.model.state_dict(), best_checkpoint_path)
                         print(f'New best model saved with Dice={best_dice:.2f} at {best_checkpoint_path}')
-    torch.save(model.state_dict(), './weight.pkl')
-    torch.save(model.state_dict(), last_checkpoint_path)
+                log_validation_metrics(writer, eval_results, epoch)
+    torch.save(model.model.state_dict(), './weight.pkl')
+    torch.save(model.model.state_dict(), last_checkpoint_path)
+
+    if writer is not None:
+        writer.close()
+
+    export_trained_model_to_onnx(args2, best_checkpoint_path if os.path.exists(best_checkpoint_path) else last_checkpoint_path)
 
 
 
@@ -276,9 +358,12 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=0.0003)
     parser.add_argument("--train_batchsize", type=int, default=2)
     parser.add_argument("--val_batchsize", type=int, default=1)
-    parser.add_argument("--crop_size", type=int, nargs='+', default=[512, 512], help='H, W')
+    parser.add_argument("--train_workers", type=int, default=8, help='Number of worker processes for training loader')
+    parser.add_argument("--val_workers", type=int, default=4, help='Number of worker processes for validation loader')
+    parser.add_argument("--crop_size", type=int, nargs='+', default=[1024, 1024], help='H, W')
 
     parser.add_argument("--nclass", type=int, default=4)
+    parser.add_argument("--input_channels", type=int, default=3)
     parser.add_argument("--val_output_dir", type=str, default='./val_predictions',
                         help='Directory for saving validation predictions')
     parser.add_argument("--visdom_server", type=str, default='http://localhost',
@@ -286,6 +371,13 @@ def parse_args():
     parser.add_argument("--visdom_port", type=int, default=8097, help='Visdom server port')
     parser.add_argument("--visdom_env", type=str, default='zig_rir', help='Visdom environment name')
     parser.add_argument("--disable_visdom", action='store_true', help='Disable Visdom visualisation')
+    parser.add_argument("--log_dir", type=str, default='./runs/zig_rir', help='TensorBoard log directory')
+    parser.add_argument("--disable_logging", action='store_true', help='Disable TensorBoard logging')
+    parser.add_argument("--val_interval", type=int, default=10, help='Number of epochs between validations')
+    parser.add_argument("--onnx_path", type=str, default='./checkpoints/best_model.onnx', help='Output path for ONNX export')
+    parser.add_argument("--onnx_opset", type=int, default=13, help='ONNX opset version')
+    parser.add_argument("--export_input_size", type=int, nargs='+', default=None,
+                        help='Optional ONNX export size. Provide H W or C H W')
 
     args2 = parser.parse_args()
 
