@@ -79,8 +79,7 @@ class WKV(torch.autograd.Function):
             return (None, None, None, gw, gu, gk, gv)
 
 
-@torch.jit.script
-def _wkv_fallback_scan(
+def _wkv_fallback_scan_reference(
     k: torch.Tensor,
     v: torch.Tensor,
     decay: torch.Tensor,
@@ -109,6 +108,75 @@ def _wkv_fallback_scan(
         state_den = state_den * decay + exp_k
 
     return outputs
+
+
+@torch.jit.script
+def _wkv_fallback_scan(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    decay: torch.Tensor,
+    first: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    B = k.size(0)
+    T = k.size(1)
+    C = k.size(2)
+
+    exp_k = _exp_clamped(k)
+
+    decay = decay.view(decay.size(0), 1, decay.size(1)).expand(B, T, C)
+    first = first.view(first.size(0), 1, first.size(1)).expand(B, T, C)
+
+    ones = torch.ones((B, 1, C), dtype=k.dtype, device=k.device)
+    decay_cumprod = torch.cumprod(decay, dim=1)
+    decay_prefix = torch.cat((ones, decay_cumprod[:, :-1, :]), dim=1)
+    decay_prefix_inv = torch.reciprocal(decay_prefix)
+
+    weighted_v = exp_k * v
+
+    state_num = torch.cumsum(weighted_v * decay_prefix_inv, dim=1) * decay_prefix
+    state_den = torch.cumsum(exp_k * decay_prefix_inv, dim=1) * decay_prefix
+
+    zero_state = torch.zeros((B, 1, C), dtype=k.dtype, device=k.device)
+    state_num_prev = torch.cat((zero_state, state_num[:, :-1, :]), dim=1)
+    state_den_prev = torch.cat((zero_state, state_den[:, :-1, :]), dim=1)
+
+    numerator = state_num_prev + first * weighted_v
+    denominator = state_den_prev + first * exp_k
+
+    return numerator / (denominator + eps)
+
+
+_wkv_fallback_scan_validated = False
+
+
+def _validate_wkv_fallback_scan() -> None:
+    global _wkv_fallback_scan_validated
+    if _wkv_fallback_scan_validated:
+        return
+    if torch.jit.is_scripting() or torch.jit.is_tracing():
+        return
+
+    generator = torch.Generator()
+    generator.manual_seed(0)
+    B, T, C = 2, 4, 3
+    k = torch.randn(B, T, C, generator=generator)
+    v = torch.randn(B, T, C, generator=generator)
+    decay = torch.rand(1, C, generator=generator)
+    first = torch.rand(1, C, generator=generator)
+    eps = float(torch.finfo(k.dtype).eps)
+
+    ref = _wkv_fallback_scan_reference(k, v, decay, first, eps)
+    vec = _wkv_fallback_scan(k, v, decay, first, eps)
+
+    max_diff = torch.max(torch.abs(ref - vec))
+    if bool(max_diff > 1e-5):
+        raise RuntimeError("_wkv_fallback_scan vectorization mismatch: max diff {}".format(float(max_diff)))
+
+    _wkv_fallback_scan_validated = True
+
+
+_validate_wkv_fallback_scan()
 
 
 def _run_wkv_fallback(B, T, C, w, u, k, v):
