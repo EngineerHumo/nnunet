@@ -16,7 +16,7 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='prp', help='Dataset name defined in dataset2d.Data')
     parser.add_argument('--data_dir', type=str, default='./data/', help='Root directory that contains the dataset folders')
     parser.add_argument('--weight-path', type=str, default='./weight.pkl', help='Path to the trained model weights saved as a pickle')
-    parser.add_argument('--output-dir', type=str, default='/output', help='Directory where predicted masks will be written')
+    parser.add_argument('--output-dir', type=str, default='./output', help='Directory where predicted masks will be written')
     parser.add_argument('--onnx-path', type=str, default='./test1.onnx', help='File path to export the ONNX model snapshot')
     parser.add_argument('--batchsize', type=int, default=1, help='Batch size for inference')
     parser.add_argument('--crop_size', type=int, nargs='+', default=[512, 512], help='Input size H W expected by the network')
