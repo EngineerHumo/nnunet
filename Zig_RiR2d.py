@@ -128,7 +128,9 @@ def _wkv_fallback_scan(
     first = first.view(first.size(0), 1, first.size(1)).expand(B, T, C)
 
     ones = torch.ones((B, 1, C), dtype=k.dtype, device=k.device)
-    decay_cumprod = torch.cumprod(decay, dim=1)
+    log_decay = torch.log(decay)
+    decay_cumsum = torch.cumsum(log_decay, dim=1)
+    decay_cumprod = torch.exp(decay_cumsum)
     decay_prefix = torch.cat((ones, decay_cumprod[:, :-1, :]), dim=1)
     decay_prefix_inv = torch.reciprocal(decay_prefix)
 
