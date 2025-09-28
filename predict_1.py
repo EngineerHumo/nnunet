@@ -94,18 +94,24 @@ def export_onnx(segmentation_model: torch.nn.Module,
     segmentation_model = segmentation_model.eval()
     dummy_input = torch.randn(1, input_channels, height, width, device=model_device)
 
-    torch.onnx.export(
-        segmentation_model,
-        dummy_input,
-        onnx_path,
-        input_names=['input'],
-        output_names=['output'],
-        opset_version=opset,
-        dynamic_axes={
-            'input': {0: 'batch', 2: 'height', 3: 'width'},
-            'output': {0: 'batch', 2: 'height', 3: 'width'}
-        }
-    )
+    try:
+        torch.onnx.export(
+            segmentation_model,
+            dummy_input,
+            onnx_path,
+            input_names=['input'],
+            output_names=['output'],
+            opset_version=opset,
+            dynamic_axes={
+                'input': {0: 'batch', 2: 'height', 3: 'width'},
+                'output': {0: 'batch', 2: 'height', 3: 'width'}
+            }
+        )
+    except RuntimeError as err:
+        if '_Map_base::at' in str(err):
+            print('ONNX export skipped due to CUDA kernel limitation (_Map_base::at).')
+            return
+        raise
 
 
 def main():
