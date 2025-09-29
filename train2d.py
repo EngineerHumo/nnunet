@@ -18,6 +18,8 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     visdom = None
 
+import pdb
+
 
 def _prepare_image_tensor(tensor: torch.Tensor) -> torch.Tensor:
     tensor = tensor.detach().float().cpu()
@@ -300,9 +302,12 @@ def train():
             label_onehot = None
             if label.dim() == 4 and label.size(1) == args2.nclass:
                 label_onehot = label.float()
+            
+            
 
 
             losses, logits = model(image, label_indices, True, label_onehot)
+            pdb.set_trace()
             loss = losses.mean()
 
             lenth_iter = len(dataloader_train)
@@ -358,7 +363,7 @@ def train():
 def parse_args():
     parser = argparse.ArgumentParser(description='Train segmentation network')
     parser.add_argument("--dataset", type=str, default='prp')
-    parser.add_argument("--end_epoch", type=int, default=400)
+    parser.add_argument("--end_epoch", type=int, default=20)
 
     parser.add_argument("--warm_epochs", type=int, default=5)
 
