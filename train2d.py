@@ -199,7 +199,7 @@ def export_trained_model_to_onnx(args2, checkpoint_path: str) -> None:
         print(f'ONNX export skipped because checkpoint {checkpoint_path} was not found.')
         return
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cpu')
     segmentation_model = build_segmentation_model(args2, device=device)
     state_dict = torch.load(checkpoint_path, map_location=device)
     segmentation_model.load_state_dict(state_dict)
