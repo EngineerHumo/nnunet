@@ -9,7 +9,7 @@ ort_session = ort.InferenceSession("/home/wensheng/jiaqi/Zig-RiR/checkpoints/bes
 x = np.random.randn(2,3,1024,1024).astype(np.float32)
 print(x.shape)
 ort_inputs = {ort_session.get_inputs()[0].name:x}
-ort_loss, ort_outs = ort_session.run(None, ort_inputs)
+ort_outs = ort_session.run(None, ort_inputs)
 print(ort_outs[0].shape)
 
 
