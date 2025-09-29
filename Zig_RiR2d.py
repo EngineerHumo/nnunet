@@ -208,18 +208,38 @@ def RUN_CUDA(B, T, C, w, u, k, v):
 
 
 def q_shift(input, shift_pixel=1, gamma=1 / 4):
-    assert gamma <= 1 / 4
+    assert 0 <= gamma <= 1 / 4
+    if shift_pixel <= 0:
+        return input.clone()
+
     B, C, H, W = input.shape
+    device = input.device
+
     output = torch.zeros_like(input)
-    output[:, 0:int(C * gamma), :, shift_pixel:W] = input[:, 0:int(C * gamma), :, 0:W - shift_pixel]
-    output[:, int(C * gamma):int(C * gamma * 2), :, 0:W - shift_pixel] = input[:, int(C * gamma):int(C * gamma * 2), :,
-                                                                         shift_pixel:W]
-    output[:, int(C * gamma * 2):int(C * gamma * 3), shift_pixel:H, :] = input[:, int(C * gamma * 2):int(C * gamma * 3),
-                                                                         0:H - shift_pixel, :]
-    output[:, int(C * gamma * 3):int(C * gamma * 4), 0:H - shift_pixel, :] = input[:,
-                                                                             int(C * gamma * 3):int(C * gamma * 4),
-                                                                             shift_pixel:H, :]
-    output[:, int(C * gamma * 4):, ...] = input[:, int(C * gamma * 4):, ...]
+    channel_indices = torch.arange(C, device=device)
+
+    # Determine channel splits without converting symbolic integers to Python scalars.
+    ratios = input.new_tensor([gamma, gamma * 2, gamma * 3, gamma * 4], dtype=torch.float32)
+    channel_count = channel_indices.new_full((1,), C, dtype=torch.float32)
+    limits = torch.clamp((ratios * channel_count).floor().to(dtype=torch.long), min=0, max=C)
+
+    mask1 = channel_indices < limits[0]
+    mask2 = (channel_indices >= limits[0]) & (channel_indices < limits[1])
+    mask3 = (channel_indices >= limits[1]) & (channel_indices < limits[2])
+    mask4 = (channel_indices >= limits[2]) & (channel_indices < limits[3])
+    mask_rest = channel_indices >= limits[3]
+
+    valid_w = max(W - shift_pixel, 0)
+    valid_h = max(H - shift_pixel, 0)
+
+    if valid_w > 0:
+        output[:, mask1, :, shift_pixel:shift_pixel + valid_w] = input[:, mask1, :, :valid_w]
+        output[:, mask2, :, :valid_w] = input[:, mask2, :, shift_pixel:shift_pixel + valid_w]
+    if valid_h > 0:
+        output[:, mask3, shift_pixel:shift_pixel + valid_h, :] = input[:, mask3, :valid_h, :]
+        output[:, mask4, :valid_h, :] = input[:, mask4, shift_pixel:shift_pixel + valid_h, :]
+
+    output[:, mask_rest, ...] = input[:, mask_rest, ...]
     return output
 
 
@@ -248,45 +268,54 @@ class VRWKV_SpatialMix(nn.Module):
         self.spatial_first = nn.Parameter(torch.randn((self.recurrence, self.n_embd)))
 
     def get_zigzag_indices(self, h, w, start='top-left', direction='horizontal'):
-        indices = []
-        if start == 'top-left':
-            row_start = 0
-            col_start = 0
-            row_step = 1
-            col_step = 1 if direction == 'horizontal' else 1
-        elif start == 'top-right':
-            row_start = 0
-            col_start = w - 1
-            row_step = 1
-            col_step = -1 if direction == 'horizontal' else -1
-        elif start == 'bottom-left':
-            row_start = h - 1
-            col_start = 0
-            row_step = -1
-            col_step = 1 if direction == 'horizontal' else 1
-        elif start == 'bottom-right':
-            row_start = h - 1
-            col_start = w - 1
-            row_step = -1
-            col_step = -1 if direction == 'horizontal' else -1
+        device = self.device if self.device is not None else torch.device('cpu')
+        rows = torch.arange(h, device=device)
+        cols = torch.arange(w, device=device)
 
-        for i in range(h):
-            current_row = row_start + row_step * i
-            if direction == 'horizontal':
-                if current_row % 2 == 0:
-                    cols = list(range(w))
-                else:
-                    cols = list(range(w - 1, -1, -1))
-                for col in cols:
-                    indices.append(current_row * w + col)
-            elif direction == 'vertical':
-                if (col_start + col_step * i) % 2 == 0:
-                    rows = list(range(h))
-                else:
-                    rows = list(range(h - 1, -1, -1))
-                for row in rows:
-                    indices.append(row * w + (col_start + col_step * i))
-        return torch.tensor(indices, dtype=torch.long, device=self.device)
+        if direction == 'horizontal':
+            row_order = rows
+            if start in ('bottom-left', 'bottom-right'):
+                row_order = torch.flip(row_order, dims=(0,))
+
+            base_cols = cols
+            reverse_cols = torch.flip(base_cols, dims=(0,))
+            if start in ('top-left', 'bottom-left'):
+                even_cols = base_cols
+                odd_cols = reverse_cols
+            else:
+                even_cols = reverse_cols
+                odd_cols = base_cols
+
+            even_cols_matrix = even_cols.unsqueeze(0).expand(h, -1)
+            odd_cols_matrix = odd_cols.unsqueeze(0).expand(h, -1)
+            is_even_row = (row_order % 2 == 0).unsqueeze(1)
+            cols_matrix = torch.where(is_even_row, even_cols_matrix, odd_cols_matrix)
+            rows_matrix = row_order.unsqueeze(1).expand(-1, w)
+        else:
+            col_order = cols
+            if start in ('top-right', 'bottom-right'):
+                col_order = torch.flip(col_order, dims=(0,))
+
+            base_rows = rows
+            reverse_rows = torch.flip(base_rows, dims=(0,))
+            if start in ('top-left', 'top-right'):
+                even_rows = base_rows
+                odd_rows = reverse_rows
+            else:
+                even_rows = reverse_rows
+                odd_rows = base_rows
+
+            even_rows_matrix = even_rows.unsqueeze(0).expand(w, -1)
+            odd_rows_matrix = odd_rows.unsqueeze(0).expand(w, -1)
+            is_even_col = (col_order % 2 == 0).unsqueeze(1)
+            rows_per_col = torch.where(is_even_col, even_rows_matrix, odd_rows_matrix)
+            cols_per_col = col_order.unsqueeze(1).expand(-1, h)
+
+            rows_matrix = rows_per_col.transpose(0, 1)
+            cols_matrix = cols_per_col.transpose(0, 1)
+
+        indices = rows_matrix * w + cols_matrix
+        return indices.reshape(-1).to(dtype=torch.long)
 
 
     def jit_func(self, x, resolution, scan_scheme):
@@ -425,9 +454,9 @@ class PatchMerging2D_sentence(nn.Module):
         x = self.norm(x)
         x = x.transpose(1, 2).reshape(B, C, H, W)
         x = self.conv(x)
-        H, W = math.ceil(H / self.stride), math.ceil(W / self.stride)
-        x = x.reshape(B, -1, H * W).transpose(1, 2)
-        return x, H, W
+        _, _, new_h, new_w = x.shape
+        x = x.reshape(B, -1, new_h * new_w).transpose(1, 2)
+        return x, new_h, new_w
 
 
 class PatchMerging2D_word(nn.Module):
@@ -445,9 +474,10 @@ class PatchMerging2D_word(nn.Module):
         x = self.norm(x)
         x = x.reshape(-1, H_out, W_out, H_in, W_in, C)
 
-        pad_input = (H_out % 2 == 1) or (W_out % 2 == 1)
-        if pad_input:
-            x = F.pad(x.permute(0, 3, 4, 5, 1, 2), (0, W_out % 2, 0, H_out % 2))
+        pad_h = H_out & 1
+        pad_w = W_out & 1
+        if pad_h or pad_w:
+            x = F.pad(x.permute(0, 3, 4, 5, 1, 2), (0, pad_w, 0, pad_h))
             x = x.permute(0, 4, 5, 1, 2, 3)
 
         x1 = x[:, 0::2, 0::2, :, :, :]
@@ -642,7 +672,7 @@ class PyramidRiR_enc(nn.Module):
                 outer_tokens, H_out, W_out = self.sentence_merges[i - 1](outer_tokens, H_out, W_out)
             inner_tokens, outer_tokens = self.stages[i](inner_tokens, outer_tokens, H_out, W_out, H_in, W_in)
             b, l, m = outer_tokens.shape
-            mid_out = outer_tokens.reshape(b, int(math.sqrt(l)), int(math.sqrt(l)), m).permute(0, 3, 1, 2)
+            mid_out = outer_tokens.reshape(b, H_out, W_out, m).permute(0, 3, 1, 2)
             mid_out = self.up_blocks[i](mid_out)
             outputs.append(mid_out)
         return outputs
