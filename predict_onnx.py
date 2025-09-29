@@ -1,141 +1,180 @@
+"""Utility helpers for quickly validating ONNX exports.
 
-#####测试版本
-import onnx
+This script can be used in two modes:
+
+1.  Inspect the tensor shapes recorded in the ONNX graph (after running
+    ``onnx.shape_inference``).  This is useful to debug broadcasting issues such
+    as the ``Add`` failure that was reported when feeding a tensor of shape
+    ``(2, 3, 1024, 1024)``.
+2.  Optionally run a quick inference pass with random data to confirm that the
+    exported model accepts the supplied shape.
+
+Example usages::
+
+    # Print the model IO description and inspect the tensors that feed Add_3
+    python predict_onnx.py --model /path/to/best_model.onnx \
+        --inspect-node Add_3
+
+    # Run an inference test with the desired input shape
+    python predict_onnx.py --model /path/to/best_model.onnx \
+        --input-shape 2,3,1024,1024 --run-inference
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from typing import Iterable, List, Optional, Sequence
+
 import numpy as np
-onnx_model = onnx.load("/home/wensheng/jiaqi/Zig-RiR/checkpoints/best_model.onnx")
-onnx.checker.check_model(onnx_model)
-import onnxruntime as ort
-ort_session = ort.InferenceSession("/home/wensheng/jiaqi/Zig-RiR/checkpoints/best_model.onnx", providers=['CPUExecutionProvider']) # 创建一个推理session
-x = np.random.randn(2,3,1024,1024).astype(np.float32)
-print(x.shape)
-ort_inputs = {ort_session.get_inputs()[0].name:x}
-ort_outs = ort_session.run(None, ort_inputs)
-print(ort_outs[0].shape)
-
-
-'''
 import onnx
-import numpy as np
-import cv2
-import os
-from pathlib import Path
+from onnx import shape_inference
 import onnxruntime as ort
 
-def process_images(input_folder, output_folder, model_path):
-    """
-    批量处理PNG图像并进行模型预测
-    
-    参数:
-        input_folder: 输入图像文件夹路径
-        output_folder: 输出结果文件夹路径  
-        model_path: ONNX模型文件路径
-    """
-    
-    # 创建输出文件夹
-    Path(output_folder).mkdir(parents=True, exist_ok=True)
-    
-    # 加载ONNX模型
-    print("正在加载ONNX模型...")
-    ort_session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
-    
-    # 获取支持的图像格式
-    image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']
-    
-    # 遍历输入文件夹中的所有图像文件
-    image_files = [f for f in os.listdir(input_folder) 
-                  if any(f.lower().endswith(ext) for ext in image_extensions)]
-    
-    print(f"找到 {len(image_files)} 个图像文件")
-    
-    for i, filename in enumerate(image_files):
-        print(f"处理第 {i+1}/{len(image_files)} 个图像: {filename}")
-        
-        # 读取图像
-        image_path = os.path.join(input_folder, filename)
-        image = cv2.imread(image_path)
-        
-        if image is None:
-            print(f"警告: 无法读取图像 {filename}, 跳过")
-            continue
-            
-        # 检查图像尺寸
-        if image.shape[:2] != (1240, 1240):
-            print(f"警告: 图像 {filename} 的尺寸为 {image.shape}, 期望 (1240, 1240), 跳过")
-            continue
-            
-        # 转换为RGB (OpenCV读取的是BGR)
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
-        # 预处理: 填充图像到1280x1280
-        padded_image = np.pad(image_rgb, ((20, 20), (20, 20), (0, 0)), 
-                             mode='constant', constant_values=0)
-        
-        # 转换图像格式为模型输入要求 (1, 3, 1280, 1280)
-        input_array = padded_image.transpose(2, 0, 1)  # (H,W,C) -> (C,H,W)
-        input_array = input_array.astype(np.float32) / 255.0  # 归一化到0-1
-        input_array = np.expand_dims(input_array, axis=0)  # 添加batch维度
-        
-        # 模型推理
-        ort_inputs = {ort_session.get_inputs()[0].name: input_array}
-        ort_outs = ort_session.run(None, ort_inputs)
-        
-        # 获取预测结果 (1, 4, 1280, 1280)
-        prediction = ort_outs[0][0]  # 移除batch维度, 得到(4, 1280, 1280)
-        
-        # 后处理: 将4个通道转换为4张二值图像
-        # 使用softmax获取每个像素的类别概率
-        exp_pred = np.exp(prediction - np.max(prediction, axis=0, keepdims=True))
-        softmax_pred = exp_pred / np.sum(exp_pred, axis=0, keepdims=True)
-        
-        # 获取每个像素的预测类别 (0-3)
-        class_map = np.argmax(softmax_pred, axis=0)
-        
-        # 创建4张二值图像 (每个类别一张)
-        binary_masks = []
-        for class_idx in range(4):
-            # 创建二值掩码: 属于该类别的像素为255, 其他为0
-            binary_mask = (class_map == class_idx).astype(np.uint8) * 255
-            binary_masks.append(binary_mask)
-        
-        # 创建合并的灰度图像: 不同类别用不同灰度值表示
-        gray_combined = np.zeros_like(class_map, dtype=np.uint8)
-        # 设置不同类别的灰度值 (可以调整这些值以获得更好的对比度)
-        gray_values = [0, 85, 170, 255]  # 类别0-3对应的灰度值
-        for class_idx, gray_val in enumerate(gray_values):
-            gray_combined[class_map == class_idx] = gray_val
-        
-        # 裁剪所有图像回1240x1240 (去掉填充的40像素)
-        def crop_to_original(img):
-            return img[20:1260, 20:1260]  # 从1280x1280裁剪回1240x1240
-        
-        # 裁剪所有结果图像
-        cropped_binary_masks = [crop_to_original(mask) for mask in binary_masks]
-        cropped_gray_combined = crop_to_original(gray_combined)
-        
-        # 保存结果图像
-        base_name = os.path.splitext(filename)[0]
-        
-        # 保存4张二值图像
-        for class_idx, binary_mask in enumerate(cropped_binary_masks):
-            output_path = os.path.join(output_folder, f"{base_name}_class{class_idx}.png")
-            cv2.imwrite(output_path, binary_mask)
-        
-        # 保存合并的灰度图像
-        combined_path = os.path.join(output_folder, f"{base_name}_combined.png")
-        cv2.imwrite(combined_path, cropped_gray_combined)
-        
-        print(f"已完成: {filename} -> 生成5张结果图像")
-    
-    print("所有图像处理完成!")
 
-# 使用示例
+@dataclass
+class TensorDescription:
+    """Light-weight representation of a tensor value info entry."""
+
+    name: str
+    dtype: Optional[str]
+    shape: Sequence[Optional[int]]
+
+    def format(self) -> str:
+        dims = [str(dim) if dim is not None else "?" for dim in self.shape]
+        shape_str = f"({', '.join(dims)})" if dims else "()"
+        dtype = self.dtype or "unknown"
+        return f"{self.name}: {dtype} {shape_str}"
+
+
+def _parse_shape(shape_str: str) -> Sequence[int]:
+    try:
+        return tuple(int(dim) for dim in shape_str.split(","))
+    except ValueError as exc:  # pragma: no cover - defensive
+        raise argparse.ArgumentTypeError(
+            f"Unable to parse shape '{shape_str}'. Expect comma separated integers."
+        ) from exc
+
+
+def _collect_value_infos(graph: onnx.GraphProto) -> List[onnx.ValueInfoProto]:
+    infos: List[onnx.ValueInfoProto] = []
+    infos.extend(graph.input)
+    infos.extend(graph.value_info)
+    infos.extend(graph.output)
+    return infos
+
+
+def _dtype_of(value_info: onnx.ValueInfoProto) -> Optional[str]:
+    tensor_type = value_info.type.tensor_type
+    if tensor_type.elem_type == 0:  # pragma: no cover - extremely rare
+        return None
+    return onnx.mapping.TENSOR_TYPE_TO_NP_TYPE.get(tensor_type.elem_type, None)
+
+
+def _shape_of(value_info: onnx.ValueInfoProto) -> Sequence[Optional[int]]:
+    dims: List[Optional[int]] = []
+    for dim in value_info.type.tensor_type.shape.dim:
+        if dim.HasField("dim_value"):
+            dims.append(int(dim.dim_value))
+        elif dim.HasField("dim_param"):
+            dims.append(None)
+        else:  # pragma: no cover - defensive
+            dims.append(None)
+    return dims
+
+
+def _describe_tensor(graph: onnx.GraphProto, name: str) -> Optional[TensorDescription]:
+    for info in _collect_value_infos(graph):
+        if info.name == name:
+            return TensorDescription(name=name, dtype=_dtype_of(info), shape=_shape_of(info))
+    return None
+
+
+def _print_model_ios(graph: onnx.GraphProto) -> None:
+    print("Model inputs:")
+    for value in graph.input:
+        desc = TensorDescription(name=value.name, dtype=_dtype_of(value), shape=_shape_of(value))
+        print(f"  - {desc.format()}")
+
+    print("Model outputs:")
+    for value in graph.output:
+        desc = TensorDescription(name=value.name, dtype=_dtype_of(value), shape=_shape_of(value))
+        print(f"  - {desc.format()}")
+
+
+def _print_node_shapes(graph: onnx.GraphProto, inspect_names: Iterable[str]) -> None:
+    wanted = set(inspect_names)
+    if not wanted:
+        return
+
+    print("\nRequested node input shapes:")
+    for node in graph.node:
+        if not any(key in node.name for key in wanted):
+            continue
+
+        print(f"- Node: {node.name} ({node.op_type})")
+        for idx, input_name in enumerate(node.input):
+            desc = _describe_tensor(graph, input_name)
+            if desc is None:
+                print(f"    input[{idx}] {input_name}: <shape unknown>")
+            else:
+                print(f"    input[{idx}] {desc.format()}")
+        for idx, output_name in enumerate(node.output):
+            desc = _describe_tensor(graph, output_name)
+            if desc is None:
+                print(f"    output[{idx}] {output_name}: <shape unknown>")
+            else:
+                print(f"    output[{idx}] {desc.format()}")
+
+
+def _run_inference(model_path: str, input_shape: Sequence[int]) -> None:
+    session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    dummy = np.random.randn(*input_shape).astype(np.float32)
+    inputs = {session.get_inputs()[0].name: dummy}
+    outputs = session.run(None, inputs)
+    print("Inference succeeded. Output tensor shapes:")
+    for idx, array in enumerate(outputs):
+        print(f"  - output[{idx}]: {array.shape}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Inspect and test ONNX exports.")
+    parser.add_argument("--model", required=True, help="Path to the ONNX model file.")
+    parser.add_argument(
+        "--input-shape",
+        type=_parse_shape,
+        help="Comma separated shape to test inference with, e.g. 1,3,1024,1024.",
+    )
+    parser.add_argument(
+        "--inspect-node",
+        action="append",
+        default=[],
+        help="Substring of node names to inspect (can be used multiple times).",
+    )
+    parser.add_argument(
+        "--run-inference",
+        action="store_true",
+        help="Run an inference pass with random data using --input-shape.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    model = onnx.load(args.model)
+    onnx.checker.check_model(model)
+
+    inferred = shape_inference.infer_shapes(model)
+    graph = inferred.graph
+
+    _print_model_ios(graph)
+    _print_node_shapes(graph, args.inspect_node)
+
+    if args.run_inference:
+        if args.input_shape is None:
+            raise SystemExit("--run-inference requires --input-shape to be specified.")
+        _run_inference(args.model, args.input_shape)
+
+
 if __name__ == "__main__":
-    # 设置路径
-    input_folder = "/home/wensheng/gjq_workspace/nnUNet/DATASET/nnUNet_raw/Dataset001_prp/imagesTs"  # 替换为你的输入图像文件夹路径
-    output_folder = "/home/wensheng/gjq_workspace/nnUNet/output"  # 替换为你的输出文件夹路径
-    model_path = "/home/wensheng/gjq_workspace/nnUNet/DATASET/nnUNet_trained_models/Dataset001_prp/nnUNetTrainer__nnUNetPlans__2d/onnx_exports/fold_all_checkpoint_final.onnx"
-    
-    # 处理图像
-    process_images(input_folder, output_folder, model_path)
-
-'''
+    main()
