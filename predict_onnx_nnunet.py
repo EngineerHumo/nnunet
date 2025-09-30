@@ -6,7 +6,7 @@ onnx_model = onnx.load("/home/wensheng/jiaqi/Zig-RiR/checkpoints/best_model.onnx
 onnx.checker.check_model(onnx_model)
 import onnxruntime as ort
 ort_session = ort.InferenceSession("/home/wensheng/jiaqi/Zig-RiR/checkpoints/best_model.onnx", providers=['CPUExecutionProvider']) # 创建一个推理session
-x = np.random.randn(2,3,1024,1024).astype(np.float32)
+x = np.random.randn(3,1024,1024).astype(np.float32)
 print(x.shape)
 ort_inputs = {ort_session.get_inputs()[0].name:x}
 ort_outs = ort_session.run(None, ort_inputs)

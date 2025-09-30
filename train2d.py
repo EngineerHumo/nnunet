@@ -192,7 +192,7 @@ def log_validation_metrics(writer: Optional[SummaryWriter], summary: Optional[di
                 continue
             writer.add_scalar(f'val/{class_name}/{metric_name}', value, epoch)
 
-
+'''
 def export_trained_model_to_onnx(args2, checkpoint_path: str) -> None:
     if not args2.onnx_path:
         return
@@ -234,7 +234,49 @@ def export_trained_model_to_onnx(args2, checkpoint_path: str) -> None:
         }
     )
     print(f'Exported ONNX model to {os.path.abspath(args2.onnx_path)}')
+'''
+def export_trained_model_to_onnx(args2, checkpoint_path: str) -> None:
+    if not args2.onnx_path:
+        return
 
+    if not os.path.exists(checkpoint_path):
+        print(f'ONNX export skipped because checkpoint {checkpoint_path} was not found.')
+        return
+
+    device = torch.device('cpu')
+    segmentation_model = build_segmentation_model(args2, device=device)
+    state_dict = torch.load(checkpoint_path, map_location=device)
+    segmentation_model.load_state_dict(state_dict)
+    segmentation_model.eval()
+
+    # 使用固定尺寸而不是动态尺寸
+    if args2.export_input_size is not None:
+        if len(args2.export_input_size) == 2:
+            height, width = args2.export_input_size
+        elif len(args2.export_input_size) == 3:
+            _, height, width = args2.export_input_size
+        else:
+            raise ValueError('export_input_size must have 2 (H W) or 3 (C H W) values')
+    else:
+        height, width = args2.crop_size
+
+    # 创建固定尺寸的输入
+    dummy_input = torch.randn(1, args2.input_channels, height, width, device=device)
+
+    os.makedirs(os.path.dirname(args2.onnx_path) or '.', exist_ok=True)
+
+    # 修改导出参数，移除动态尺寸
+    torch.onnx.export(
+        segmentation_model,
+        dummy_input,
+        args2.onnx_path,
+        input_names=['input'],
+        output_names=['output'],
+        opset_version=args2.onnx_opset,
+        # 移除dynamic_axes，使用固定尺寸
+        do_constant_folding=True  # 启用常量折叠优化
+    )
+    print(f'Exported ONNX model with fixed size {args2.input_channels}x{height}x{width} to {os.path.abspath(args2.onnx_path)}')
 
 def train():
     from test2d import Eval
@@ -307,7 +349,7 @@ def train():
 
 
             losses, logits = model(image, label_indices, True, label_onehot)
-            pdb.set_trace()
+            #pdb.set_trace()
             loss = losses.mean()
 
             lenth_iter = len(dataloader_train)
@@ -388,8 +430,15 @@ def parse_args():
     parser.add_argument("--val_interval", type=int, default=10, help='Number of epochs between validations')
     parser.add_argument("--onnx_path", type=str, default='./checkpoints/best_model.onnx', help='Output path for ONNX export')
     parser.add_argument("--onnx_opset", type=int, default=13, help='ONNX opset version')
-    parser.add_argument("--export_input_size", type=int, nargs='+', default=None,
-                        help='Optional ONNX export size. Provide H W or C H W')
+    
+    
+    #parser.add_argument("--export_input_size", type=int, nargs='+', default=None,
+    #                    help='Optional ONNX export size. Provide H W or C H W')
+    
+    
+    # 在 parse_args() 函数中修改默认值
+    parser.add_argument("--export_input_size", type=int, nargs='+', default=[1024, 1024],
+                    help='ONNX export size. Provide H W')
 
     args2 = parser.parse_args()
 
