@@ -134,6 +134,16 @@ def _make_dummy_input(
     return torch.randn(shape, device=device, dtype=dtype)
 
 
+def _build_dynamic_axes(patch_size: Sequence[int]) -> dict[str, dict[int, str]]:
+    """Create a dynamic_axes mapping compatible with torch>=1.8 without DynamicDimension."""
+
+    axis_template = {0: "batch", 1: "channels"}
+    for idx in range(len(patch_size)):
+        axis_template[idx + 2] = f"dim{idx}"
+
+    return {"input": axis_template, "output": axis_template.copy()}
+
+
 def export_fold_to_onnx(
     model_dir: str,
     fold: int,
@@ -153,11 +163,16 @@ def export_fold_to_onnx(
 
     dynamic_axes_map = None
     if dynamic_axes:
-        # Allow dynamic batch and spatial dimensions
-        axis_template = {0: "batch", 1: "channels"}
-        for idx in range(len(patch_size)):
-            axis_template[idx + 2] = f"dim{idx}"
-        dynamic_axes_map = {"input": axis_template, "output": axis_template.copy()}
+        dynamic_axes_map = _build_dynamic_axes(patch_size)
+
+        torch_version = tuple(int(part) for part in torch.__version__.split("+", 1)[0].split(".")[:2])
+        if torch_version >= (2, 2):
+            # DynamicDimension was removed in PyTorch 2.2+, but torch.onnx.export still accepts
+            # string-based dynamic_axes dictionaries. Inform the user so they know the behaviour.
+            print(
+                "Info: torch.onnx.DynamicDimension is unavailable in PyTorch >=2.2. "
+                "Using string-based dynamic_axes mapping instead."
+            )
 
     output_file = output_file.with_suffix(".onnx")
     maybe_mkdir_p(str(output_file.parent))
