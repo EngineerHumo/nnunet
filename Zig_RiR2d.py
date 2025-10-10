@@ -213,33 +213,52 @@ def q_shift(input, shift_pixel=1, gamma=1 / 4):
         return input.clone()
 
     B, C, H, W = input.shape
-    device = input.device
+
+    def _compute_boundary(prev_boundary, ratio):
+        boundary = int(math.floor(ratio * C))
+        boundary = max(boundary, prev_boundary)
+        boundary = min(boundary, C)
+        return boundary
+
+    boundaries = []
+    prev = 0
+    for ratio in (gamma, gamma * 2, gamma * 3, gamma * 4):
+        prev = _compute_boundary(prev, ratio)
+        boundaries.append(prev)
+
+    c1, c2, c3, c4 = boundaries
 
     output = torch.zeros_like(input)
-    channel_indices = torch.arange(C, device=device)
 
-    # Determine channel splits without converting symbolic integers to Python scalars.
-    ratios = input.new_tensor([gamma, gamma * 2, gamma * 3, gamma * 4], dtype=torch.float32)
-    channel_count = channel_indices.new_full((1,), C, dtype=torch.float32)
-    limits = torch.clamp((ratios * channel_count).floor().to(dtype=torch.long), min=0, max=C)
+    def shift_width(src, direction):
+        if src.shape[1] == 0:
+            return src
+        if direction == "right":
+            padded = F.pad(src, (shift_pixel, 0, 0, 0))
+            return padded[..., :W]
+        padded = F.pad(src, (0, shift_pixel, 0, 0))
+        return padded[..., shift_pixel:]
 
-    mask1 = channel_indices < limits[0]
-    mask2 = (channel_indices >= limits[0]) & (channel_indices < limits[1])
-    mask3 = (channel_indices >= limits[1]) & (channel_indices < limits[2])
-    mask4 = (channel_indices >= limits[2]) & (channel_indices < limits[3])
-    mask_rest = channel_indices >= limits[3]
+    def shift_height(src, direction):
+        if src.shape[1] == 0:
+            return src
+        if direction == "down":
+            padded = F.pad(src, (0, 0, shift_pixel, 0))
+            return padded[..., :H, :]
+        padded = F.pad(src, (0, 0, 0, shift_pixel))
+        return padded[..., shift_pixel:, :]
 
-    valid_w = max(W - shift_pixel, 0)
-    valid_h = max(H - shift_pixel, 0)
+    if c1 > 0:
+        output[:, :c1, :, :] = shift_width(input[:, :c1, :, :], "right")
+    if c2 > c1:
+        output[:, c1:c2, :, :] = shift_width(input[:, c1:c2, :, :], "left")
+    if c3 > c2:
+        output[:, c2:c3, :, :] = shift_height(input[:, c2:c3, :, :], "down")
+    if c4 > c3:
+        output[:, c3:c4, :, :] = shift_height(input[:, c3:c4, :, :], "up")
+    if C > c4:
+        output[:, c4:, :, :] = input[:, c4:, :, :]
 
-    if valid_w > 0:
-        output[:, mask1, :, shift_pixel:shift_pixel + valid_w] = input[:, mask1, :, :valid_w]
-        output[:, mask2, :, :valid_w] = input[:, mask2, :, shift_pixel:shift_pixel + valid_w]
-    if valid_h > 0:
-        output[:, mask3, shift_pixel:shift_pixel + valid_h, :] = input[:, mask3, :valid_h, :]
-        output[:, mask4, :valid_h, :] = input[:, mask4, shift_pixel:shift_pixel + valid_h, :]
-
-    output[:, mask_rest, ...] = input[:, mask_rest, ...]
     return output
 
 
@@ -476,9 +495,9 @@ class PatchMerging2D_word(nn.Module):
 
         pad_h = H_out & 1
         pad_w = W_out & 1
-        if pad_h or pad_w:
-            x = F.pad(x.permute(0, 3, 4, 5, 1, 2), (0, pad_w, 0, pad_h))
-            x = x.permute(0, 4, 5, 1, 2, 3)
+        x = x.permute(0, 3, 4, 5, 1, 2)
+        x = F.pad(x, (0, pad_w, 0, pad_h))
+        x = x.permute(0, 4, 5, 1, 2, 3)
 
         x1 = x[:, 0::2, 0::2, :, :, :]
         x2 = x[:, 1::2, 0::2, :, :, :]
