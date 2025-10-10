@@ -216,10 +216,15 @@ def q_shift(input, shift_pixel=1, gamma=1 / 4):
     device = input.device
 
     ratios = input.new_tensor([gamma, gamma * 2, gamma * 3, gamma * 4], dtype=torch.float32)
-    channel_count = ratios.new_full((), float(C))
+    channel_count = ratios.new_tensor(C, dtype=ratios.dtype)
     boundaries = torch.floor(ratios * channel_count).to(torch.long)
     boundaries = torch.clamp(boundaries, min=0, max=C)
-    boundaries = torch.cummax(boundaries, dim=0)[0]
+
+    b0 = boundaries[0]
+    b1 = torch.maximum(boundaries[1], b0)
+    b2 = torch.maximum(boundaries[2], b1)
+    b3 = torch.maximum(boundaries[3], b2)
+    boundaries = torch.stack((b0, b1, b2, b3))
     boundaries = torch.cat([boundaries, boundaries.new_tensor([C])])
 
     idx = torch.arange(C, device=device, dtype=boundaries.dtype)
