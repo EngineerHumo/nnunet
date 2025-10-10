@@ -215,31 +215,44 @@ def q_shift(input, shift_pixel=1, gamma=1 / 4):
     B, C, H, W = input.shape
     device = input.device
 
-    output = torch.zeros_like(input)
-    channel_indices = torch.arange(C, device=device)
-
-    # Determine channel splits without converting symbolic integers to Python scalars.
     ratios = input.new_tensor([gamma, gamma * 2, gamma * 3, gamma * 4], dtype=torch.float32)
-    channel_count = channel_indices.new_full((1,), C, dtype=torch.float32)
-    limits = torch.clamp((ratios * channel_count).floor().to(dtype=torch.long), min=0, max=C)
+    channel_count = ratios.new_full((), float(C))
+    boundaries = torch.floor(ratios * channel_count).to(torch.long)
+    boundaries = torch.clamp(boundaries, min=0, max=C)
+    boundaries = torch.cummax(boundaries, dim=0)[0]
+    boundaries = torch.cat([boundaries, boundaries.new_tensor([C])])
 
-    mask1 = channel_indices < limits[0]
-    mask2 = (channel_indices >= limits[0]) & (channel_indices < limits[1])
-    mask3 = (channel_indices >= limits[1]) & (channel_indices < limits[2])
-    mask4 = (channel_indices >= limits[2]) & (channel_indices < limits[3])
-    mask_rest = channel_indices >= limits[3]
+    idx = torch.arange(C, device=device, dtype=boundaries.dtype)
+    masks = (
+        idx < boundaries[0],
+        (idx >= boundaries[0]) & (idx < boundaries[1]),
+        (idx >= boundaries[1]) & (idx < boundaries[2]),
+        (idx >= boundaries[2]) & (idx < boundaries[3]),
+        idx >= boundaries[3],
+    )
 
-    valid_w = max(W - shift_pixel, 0)
-    valid_h = max(H - shift_pixel, 0)
+    output = torch.zeros_like(input)
 
-    if valid_w > 0:
-        output[:, mask1, :, shift_pixel:shift_pixel + valid_w] = input[:, mask1, :, :valid_w]
-        output[:, mask2, :, :valid_w] = input[:, mask2, :, shift_pixel:shift_pixel + valid_w]
-    if valid_h > 0:
-        output[:, mask3, shift_pixel:shift_pixel + valid_h, :] = input[:, mask3, :valid_h, :]
-        output[:, mask4, :valid_h, :] = input[:, mask4, shift_pixel:shift_pixel + valid_h, :]
+    def shift_width(src, direction):
+        if direction == "right":
+            padded = F.pad(src, (shift_pixel, 0, 0, 0))
+            return padded[..., :W]
+        padded = F.pad(src, (0, shift_pixel, 0, 0))
+        return padded[..., shift_pixel:]
 
-    output[:, mask_rest, ...] = input[:, mask_rest, ...]
+    def shift_height(src, direction):
+        if direction == "down":
+            padded = F.pad(src, (0, 0, shift_pixel, 0))
+            return padded[..., :H, :]
+        padded = F.pad(src, (0, 0, 0, shift_pixel))
+        return padded[..., shift_pixel:, :]
+
+    output[:, masks[0], :, :] = shift_width(input[:, masks[0], :, :], "right")
+    output[:, masks[1], :, :] = shift_width(input[:, masks[1], :, :], "left")
+    output[:, masks[2], :, :] = shift_height(input[:, masks[2], :, :], "down")
+    output[:, masks[3], :, :] = shift_height(input[:, masks[3], :, :], "up")
+    output[:, masks[4], :, :] = input[:, masks[4], :, :]
+
     return output
 
 
@@ -474,11 +487,11 @@ class PatchMerging2D_word(nn.Module):
         x = self.norm(x)
         x = x.reshape(-1, H_out, W_out, H_in, W_in, C)
 
-        pad_h = H_out & 1
-        pad_w = W_out & 1
-        if pad_h or pad_w:
-            x = F.pad(x.permute(0, 3, 4, 5, 1, 2), (0, pad_w, 0, pad_h))
-            x = x.permute(0, 4, 5, 1, 2, 3)
+        pad_h = H_out % 2
+        pad_w = W_out % 2
+        x = x.permute(0, 3, 4, 5, 1, 2)
+        x = F.pad(x, (0, pad_w, 0, pad_h))
+        x = x.permute(0, 4, 5, 1, 2, 3)
 
         x1 = x[:, 0::2, 0::2, :, :, :]
         x2 = x[:, 1::2, 0::2, :, :, :]
