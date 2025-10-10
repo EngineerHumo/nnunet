@@ -493,8 +493,13 @@ class PatchMerging2D_word(nn.Module):
         x = self.norm(x)
         x = x.reshape(-1, H_out, W_out, H_in, W_in, C)
 
-        pad_h = H_out & 1
-        pad_w = W_out & 1
+        def _mod2(val):
+            if hasattr(val, "item"):
+                val = val.item()
+            return int(val) % 2
+
+        pad_h = _mod2(H_out)
+        pad_w = _mod2(W_out)
         x = x.permute(0, 3, 4, 5, 1, 2)
         x = F.pad(x, (0, pad_w, 0, pad_h))
         x = x.permute(0, 4, 5, 1, 2, 3)
